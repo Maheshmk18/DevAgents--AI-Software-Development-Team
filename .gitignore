@@ -1,0 +1,30 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# --- Node / frontend ---
+node_modules/
+dist/
+dist-ssr/
+*.local
+.vite/
+
+# --- Secrets & local env ---
+.env
+.env.*
+!.env.example
+
+# --- Logs / editor ---
+*.log
+.DS_Store
+.idea/
+.vscode/
+
+# --- Nested clone of this same project (must never be tracked) ---
+DevAgents- AI Software Development Team/

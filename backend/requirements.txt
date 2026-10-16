@@ -1,0 +1,25 @@
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+pydantic==2.9.2
+pydantic-settings==2.5.2
+pymongo==4.9.1
+python-dotenv==1.0.1
+requests==2.32.3
+
+# --- LLM provider: Groq only, via LangChain --------------------------------
+# The agents run on Groq chat models (langchain-groq -> the `groq` SDK).
+# `httpx` is pinned because the Groq SDK's HTTP layer is happiest on 0.28.x.
+groq==0.37.1
+httpx==0.28.1
+
+# --- Agent framework -------------------------------------------------------
+# The agents are LangChain chat models driven inside a LangGraph state machine.
+langchain-core>=0.3,<2
+langchain-groq>=0.2,<2
+langgraph==1.2.15
+
+# --- Tools over MCP --------------------------------------------------------
+mcp==1.30.0
+
+# --- Tests -----------------------------------------------------------------
+pytest==8.3.4
