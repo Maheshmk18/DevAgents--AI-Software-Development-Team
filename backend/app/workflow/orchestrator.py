@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 from typing import Any
 
 
@@ -29,7 +30,6 @@ class WorkflowOrchestrator:
                 name="implement",
                 agent="developer",
                 description="Implement the requested work in the appropriate project files.",
-                approval_required=True,
             ),
             WorkflowStage(
                 name="review",
@@ -45,6 +45,12 @@ class WorkflowOrchestrator:
                 name="document",
                 agent="docs",
                 description="Update the relevant documentation for the implemented work.",
+            ),
+            WorkflowStage(
+                name="final_review",
+                agent="human",
+                description="Review completed implementation and documentation before final actions.",
+                approval_required=True,
             ),
         ]
 
@@ -69,7 +75,9 @@ class WorkflowOrchestrator:
         system = (
             "You are the PLANNER agent on a software engineering team. Break the "
             "request into 3 to 6 dependency-ordered engineering tasks. Reply with "
-            "JSON only, no prose."
+            "JSON only, no prose. The developer owns all code edits, including "
+            "creating or updating test files. The tester only runs existing tests "
+            "and validation commands; never assign test-file writing to the tester."
         )
         prompt = (
             f"Request: {request}\n\n"
@@ -95,6 +103,13 @@ class WorkflowOrchestrator:
                 continue
             owner = str(item.get("owner_agent", "")).strip()
             if owner not in STAGE_ORDER:
+                owner = "developer"
+            if owner == "tester" and re.search(
+                r"\b(?:add|write|create|implement|update|modify|edit)\b.{0,100}\btests?\b"
+                r"|\btests?\b.{0,100}\b(?:add|write|create|implement|update|modify|edit)\b",
+                title,
+                re.IGNORECASE,
+            ):
                 owner = "developer"
             priority = str(item.get("priority", "")).strip()
             if priority not in ("low", "medium", "high"):

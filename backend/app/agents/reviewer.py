@@ -16,10 +16,12 @@ SYSTEM_PROMPT = (
     "(planner, developer, reviewer, tester, docs).\n"
     "Your job is the quality and safety gate for the developer's work.\n\n"
     "How to work:\n"
-    "- Re-read the touched files with repo.read_file and inspect open pull "
-    "requests with github.list_pull_requests when useful.\n"
-    "- You may propose repo.run_command to compile or lint; side-effecting tools "
-    "are queued for human approval and will NOT run now.\n"
+    "- Review only the changed files using repo.read_file. The tool results are "
+    "the source of truth for the workspace.\n"
+    "- For FastAPI endpoint changes, trace the router prefix and app registration to "
+    "confirm the exact requested URL is reachable. Do not approve a route that is "
+    "defined in an unregistered router or that the endpoint test would return 404 for.\n"
+    "- Do not run commands or inspect GitHub. The tester handles validation.\n"
     "- Judge correctness, scope, and risk. Be specific about problems.\n"
     "- End your reply with exactly one verdict line:\n"
     "  VERDICT: APPROVED\n"
@@ -38,29 +40,47 @@ class ReviewAgent(BaseAgent):
         developer = last_stage_result(state, "developer")
         deterministic_pass = bool(developer) and developer.get("status") == "implementation_ready"
 
-        target_files = extract_path_tokens(state.get("request", ""))
+        changed_files = [
+            str(event.get("arguments", {}).get("file_path"))
+            for event in state.get("tool_events", [])
+            if event.get("tool") == "repo.write_file"
+            and event.get("status") == "executed"
+            and event.get("arguments", {}).get("file_path")
+        ]
+        target_files = list(dict.fromkeys([
+            *extract_path_tokens(state.get("request", "")),
+            *changed_files,
+        ]))
         fallback_calls: list[tuple[str, dict[str, Any]]] = [
             ("repo.read_file", {"file_path": path}) for path in target_files
         ]
-        fallback_calls.append(("repo.run_command", {"command": "python -m compileall -q ."}))
-
         user_prompt = (
             f"Feature request:\n{state.get('request', '')}\n\n"
             f"Developer summary:\n{(developer or {}).get('summary', '(no developer output)')}\n\n"
+            f"Files changed in the workspace: {', '.join(dict.fromkeys(changed_files)) or '(none)'}\n\n"
             f"Files named in the request: {', '.join(target_files) or '(none)'}\n\n"
             "Review the implementation and give your verdict."
         )
 
         runtime = AgentRuntime(self.name, self.registry)
-        turn = runtime.run(SYSTEM_PROMPT, user_prompt)
+        turn = runtime.run(SYSTEM_PROMPT, user_prompt, max_steps=3)
 
         if turn is None:
             events, deferred = self.invoke_tools(fallback_calls)
-            passed = deterministic_pass
+            validation_errors = [
+                event for event in events
+                if event.get("tool") == "repo.read_file"
+                and event.get("status") in {"error", "blocked"}
+            ]
+            passed = deterministic_pass and not validation_errors
             summary = (
                 "Review passed: the implementation is ready for validation."
                 if passed
-                else "Review requested changes to the implementation."
+                else (
+                    "Review could not pass because a changed file could not be read."
+                    if validation_errors
+                    else "Review requested changes to the implementation."
+                )
             )
             engine = "deterministic"
         else:
@@ -71,6 +91,14 @@ class ReviewAgent(BaseAgent):
                 else "Review requested changes to the implementation."
             )
             passed = self._verdict(summary, default=deterministic_pass)
+            validation_errors = [
+                event for event in events
+                if event.get("tool") == "repo.read_file"
+                and event.get("status") in {"error", "blocked"}
+            ]
+            if validation_errors:
+                passed = False
+                summary = f"{summary}\nReview blocked because a changed file could not be read."
             engine = "llm"
 
         entry = self.stage_entry(

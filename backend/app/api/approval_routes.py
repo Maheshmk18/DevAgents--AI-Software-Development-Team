@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, status
 
 from app.schemas import ApprovalDecision
 from app.services.workflow_service import workflow_service
@@ -29,3 +29,5 @@ async def decide_approval(approval_id: str, decision: ApprovalDecision) -> dict[
         return workflow_service.update_approval(approval_id, decision.action, decision.arguments)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc

@@ -4,12 +4,14 @@ These lock in the behaviours that matter for safety and orchestration:
 
 * the graph shape (five agents plus a non-agent finalizer, no browser node),
 * the bounded reviewer → developer retry loop,
-* the role-scoped tool policy (read-only tools auto-run, side-effecting tools
-  are only ever *proposed*), and
+* the role-scoped tool policy (workspace changes stay in the isolated branch,
+  while external-service actions are deferred), and
 * the deferred-action contract produced by a full run.
 """
 
 from __future__ import annotations
+
+import json
 
 import pytest
 
@@ -45,8 +47,10 @@ def test_role_tools_respect_safety_policy(registry: MCPToolRegistry, agent: str)
 
 def test_roles_may_propose_the_expected_actions(registry: MCPToolRegistry) -> None:
     assert "repo.write_file" in registry.get_tools_for_agent("developer")
-    assert "repo.run_command" in registry.get_tools_for_agent("developer")
-    assert "repo.run_command" in registry.get_tools_for_agent("reviewer")
+    assert "repo.run_command" not in registry.get_tools_for_agent("developer")
+    assert "repo.run_command" not in registry.get_tools_for_agent("reviewer")
+    assert "github.list_pull_requests" not in registry.get_tools_for_agent("reviewer")
+    assert "github.get_repository" not in registry.get_tools_for_agent("developer")
     assert "repo.run_command" in registry.get_tools_for_agent("tester")
     assert "repo.write_file" in registry.get_tools_for_agent("docs")
     assert "gmail.send_email" in registry.get_tools_for_agent("docs")
@@ -73,28 +77,34 @@ def test_retry_loop_is_bounded() -> None:
     )
 
 
-def test_full_run_defers_only_side_effecting_actions(registry: MCPToolRegistry) -> None:
-    result = ExecutionService().execute_run(
-        {"id": "test-run", "message": "Build a small CLI tool"}
-    )
+def test_deferred_actions_only_include_side_effects_and_deduplicate(registry: MCPToolRegistry) -> None:
+    """Check deferred-action normalization without launching the tester recursively."""
+    stage_results = [
+        {
+            "agent": "docs",
+            "details": {
+                "deferred_actions": [
+                    {"tool": "gmail.send_email", "arguments": {"to": "owner@example.com"}},
+                    {"tool": "github.create_issue", "arguments": {"title": "Track follow-up"}},
+                ],
+            },
+        },
+        {
+            "agent": "reviewer",
+            "details": {
+                "deferred_actions": [
+                    {"tool": "github.create_issue", "arguments": {"title": "Track follow-up"}},
+                ],
+            },
+        },
+    ]
 
-    stages = [entry["agent"] for entry in result["stage_results"]]
-    assert stages and stages[0] == "planner"
-    assert result["final_answer"]
-
-    deferred = result["deferred_actions"]
-    assert deferred, "a typical run should propose at least one action"
+    deferred = ExecutionService.collect_deferred_actions(stage_results)
+    assert deferred
     assert all(registry.is_side_effecting(action["tool"]) for action in deferred)
-
-    tools = {action["tool"] for action in deferred}
-    assert "repo.write_file" in tools
-    assert "repo.run_command" in tools
+    assert {action["tool"] for action in deferred} == {"gmail.send_email", "github.create_issue"}
 
     # Identical (tool, arguments) proposals from different agents collapse to one.
-    keys = [
-        (action["tool"], sorted((action.get("arguments") or {}).items()))
-        for action in deferred
-    ]
-    assert len(keys) == len(set(map(str, keys)))
-
-    assert not any("browser" in (event.get("tool") or "") for event in result["tool_events"])
+    keys = [(action["tool"], json.dumps(action.get("arguments", {}), sort_keys=True)) for action in deferred]
+    assert len(keys) == len(set(keys))
+    assert not any("browser" in action["tool"] for action in deferred)

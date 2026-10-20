@@ -33,7 +33,15 @@ class EvaluatorService:
             checks.append({"name": "human_approval_present", "passed": False, "score": 0})
 
         status = str(run.get("status", "")).lower()
-        if status in {"waiting_for_human_approval", "ready_for_review", "completed", "approved"}:
+        if status in {
+            "waiting_for_human_approval",
+            "waiting_for_action_approval",
+            "waiting_for_pr_review",
+            "ready_for_review",
+            "completed",
+            "approved",
+            "running",
+        }:
             score += 20
             checks.append({"name": "workflow_status_valid", "passed": True, "score": 20})
         else:

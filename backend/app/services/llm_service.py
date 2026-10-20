@@ -14,11 +14,74 @@ _JSON_FENCE = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL)
 #: broken key does not cost every agent in the run a slow retry.
 FAILURE_COOLDOWN_SECONDS = 15.0
 
-#: Per-request timeout (seconds) and SDK retries. Kept low: this is an
-#: interactive console, so failing fast into the deterministic path is better
-#: than hanging.
-REQUEST_TIMEOUT_SECONDS = 30.0
-MAX_SDK_RETRIES = 1
+#: Bound provider stalls so one agent call cannot hold up the workflow for
+#: minutes before the user sees a useful failure or fallback.
+REQUEST_TIMEOUT_SECONDS = 20.0
+MAX_SDK_RETRIES = 0
+
+#: Give a rate-limited call one retry and honor the provider's reset guidance,
+#: up to one minute, instead of failing after an arbitrary short wait.
+MAX_RATE_LIMIT_RETRIES = 1
+MAX_RATE_LIMIT_WAIT_SECONDS = 60.0
+
+#: Groq states the wait in its error message, e.g. "Please try again in 15.6s".
+_RETRY_AFTER = re.compile(r"try again in ([\d.]+)\s*s", re.IGNORECASE)
+_DURATION_PART = re.compile(r"([\d.]+)\s*([hms])", re.IGNORECASE)
+
+
+def _parse_duration_seconds(value: Any) -> float | None:
+    """Parse Groq reset values such as ``7.66s`` or ``2m59.56s``."""
+    if isinstance(value, (int, float)):
+        return max(0.0, float(value))
+    text = str(value).strip().lower()
+    try:
+        return max(0.0, float(text))
+    except ValueError:
+        pass
+
+    parts = list(_DURATION_PART.finditer(text))
+    if not parts:
+        return None
+    normalized = "".join(part.group(0).replace(" ", "") for part in parts)
+    if normalized != text.replace(" ", ""):
+        return None
+    units = {"h": 3600.0, "m": 60.0, "s": 1.0}
+    return sum(float(part.group(1)) * units[part.group(2)] for part in parts)
+
+
+def is_rate_limit_error(exc: BaseException) -> bool:
+    """Whether ``exc`` is a provider rate limit (HTTP 429)."""
+    if getattr(exc, "status_code", None) == 429:
+        return True
+    if "RateLimit" in type(exc).__name__:
+        return True
+    text = str(exc).lower()
+    return "429" in text or "rate limit" in text
+
+
+def rate_limit_delay(exc: BaseException) -> float:
+    """How long to wait before retrying a rate-limited call."""
+    headers = getattr(getattr(exc, "response", None), "headers", None)
+    if headers is not None:
+        # Groq's reset-requests header is the daily request window (RPD), while
+        # reset-tokens is the TPM window that causes these generation failures.
+        for key in ("retry-after", "x-ratelimit-reset-tokens", "x-ratelimit-reset-requests"):
+            try:
+                value = headers.get(key)
+            except Exception:  # pragma: no cover - defensive
+                value = None
+            if value:
+                seconds = _parse_duration_seconds(value)
+                if seconds is not None:
+                    # Leave a small margin so the retry does not race the reset.
+                    return max(1.0, seconds + 2.0)
+    match = _RETRY_AFTER.search(str(exc))
+    if match:
+        try:
+            return max(1.0, float(match.group(1)) + 2.0)
+        except ValueError:  # pragma: no cover - defensive
+            pass
+    return 60.0
 
 
 class LLMService:
@@ -59,7 +122,12 @@ class LLMService:
             max_retries=MAX_SDK_RETRIES,
         )
 
-    def get_chat_model(self, tools: list[dict[str, Any]] | None = None, temperature: float = 0.2) -> Any | None:
+    def get_chat_model(
+        self,
+        tools: list[dict[str, Any]] | None = None,
+        temperature: float = 0.2,
+        tool_choice: str | dict[str, Any] | bool | None = None,
+    ) -> Any | None:
         """Return a tool-bound LangChain chat model, or ``None`` if unavailable.
 
         ``None`` is the signal for callers to use their deterministic fallback.
@@ -73,7 +141,7 @@ class LLMService:
             try:
                 model = self._build_model(provider, temperature)
                 if tools:
-                    model = model.bind_tools(tools)
+                    model = model.bind_tools(tools, tool_choice=tool_choice)
             except Exception as exc:  # pragma: no cover - depends on credentials
                 self.last_error = f"{provider}: {exc.__class__.__name__}: {str(exc)[:240]}"
                 continue
@@ -81,6 +149,23 @@ class LLMService:
             self.last_error = None
             return model
         return None
+
+    # -- invocation with rate-limit recovery --------------------------------
+    def invoke(self, model: Any, messages: list[Any]) -> Any:
+        """Invoke ``model`` with one bounded retry for provider rate limits.
+
+        Honor the provider's retry guidance up to one minute; other errors are
+        raised unchanged.
+        """
+        attempt = 0
+        while True:
+            try:
+                return model.invoke(messages)
+            except Exception as exc:
+                attempt += 1
+                if attempt > MAX_RATE_LIMIT_RETRIES or not is_rate_limit_error(exc):
+                    raise
+                time.sleep(min(rate_limit_delay(exc), MAX_RATE_LIMIT_WAIT_SECONDS))
 
     # -- text generation ----------------------------------------------------
     def generate(self, prompt: str, system_prompt: str | None = None) -> dict[str, Any]:
@@ -99,7 +184,7 @@ class LLMService:
         messages.append(HumanMessage(prompt))
 
         try:
-            response = model.invoke(messages)
+            response = self.invoke(model, messages)
             text = response.content if isinstance(response.content, str) else str(response.content)
             text = text.strip()
             if not text:
@@ -149,8 +234,22 @@ class LLMService:
 
     def mark_failure(self, exc: BaseException) -> None:
         """Record a provider failure so ``status()`` can explain the fallback."""
-        self.last_error = f"{self.last_provider or 'llm'}: {exc.__class__.__name__}: {str(exc)[:240]}"
+        failed_provider = self.last_provider or "llm"
         self.last_provider = "fallback"
+        if is_rate_limit_error(exc):
+            retry_delay = rate_limit_delay(exc)
+            limit_kind = "tokens per minute" if re.search(
+                r"tokens per minute|\bTPM\b", str(exc), re.IGNORECASE
+            ) else "requests"
+            self.last_error = (
+                f"{failed_provider}: HTTP 429 rate limit ({limit_kind}); "
+                f"provider retry window is about {retry_delay:.0f}s."
+            )
+            # Let the next workflow run try again; it will honor the provider's
+            # retry guidance instead of being hidden behind the generic cooldown.
+            self._unavailable_until = 0.0
+            return
+        self.last_error = f"{failed_provider}: {exc.__class__.__name__}: {str(exc)[:240]}"
         self._unavailable_until = time.monotonic() + FAILURE_COOLDOWN_SECONDS
 
     def status(self) -> dict[str, Any]:

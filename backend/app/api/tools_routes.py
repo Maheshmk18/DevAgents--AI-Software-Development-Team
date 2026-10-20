@@ -5,10 +5,20 @@ from typing import Any
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
+from app.integrations.errors import IntegrationError
 from app.mcp.tool_registry import MCPToolRegistry
 
 router = APIRouter(prefix="/api/tools", tags=["tools"])
 tool_registry = MCPToolRegistry()
+
+
+def _fail(exc: Exception) -> HTTPException:
+    """Turn an integration failure into a readable HTTP error."""
+    if isinstance(exc, IntegrationError):
+        return HTTPException(status_code=503, detail=str(exc))
+    if isinstance(exc, ValueError):
+        return HTTPException(status_code=400, detail=str(exc))
+    return HTTPException(status_code=500, detail=f"Tool failed: {exc}")
 
 
 class GmailListRequest(BaseModel):
@@ -42,8 +52,8 @@ async def list_tools() -> list[dict[str, str]]:
 async def list_gmail_messages(request: GmailListRequest) -> dict[str, Any]:
     try:
         return tool_registry.call_tool("gmail.list_messages", {"query": request.query, "max_results": request.max_results})
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise _fail(exc) from exc
 
 
 @router.post("/gmail/send")
@@ -58,16 +68,16 @@ async def send_gmail_message(request: GmailSendRequest) -> dict[str, Any]:
                 "cc": request.cc,
             },
         )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise _fail(exc) from exc
 
 
 @router.post("/github/repository")
 async def get_github_repository(request: GitHubRepoRequest) -> dict[str, Any]:
     try:
         return tool_registry.call_tool("github.get_repository", {"owner": request.owner, "repo": request.repo})
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise _fail(exc) from exc
 
 
 @router.post("/github/issues")
@@ -77,5 +87,5 @@ async def create_github_issue(request: GitHubIssueRequest) -> dict[str, Any]:
             "github.create_issue",
             {"owner": request.owner, "repo": request.repo, "title": request.title, "body": request.body},
         )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise _fail(exc) from exc

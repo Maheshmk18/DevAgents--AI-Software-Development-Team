@@ -9,6 +9,20 @@ path stub those collaborators themselves.
 
 from __future__ import annotations
 
+import os
+import sys
+from pathlib import Path
+
+# Settings loads ``backend/.env`` during import. A developer's local file may
+# contain an Atlas ``mongodb+srv://`` URL, whose DNS lookup happens inside
+# ``MongoClient`` before fixtures can replace the client. Give tests a local,
+# non-resolving URI before importing the application; the fixture below then
+# swaps in the offline client before any test can use it.
+os.environ["MONGO_URI"] = "mongodb://127.0.0.1:27017"
+_BACKEND_ROOT = str(Path(__file__).resolve().parents[1])
+if _BACKEND_ROOT not in sys.path:
+    sys.path.insert(0, _BACKEND_ROOT)
+
 import pytest
 
 from app import db

@@ -27,9 +27,19 @@ def read_file(file_path: str) -> dict[str, Any]:
     return {"file_path": file_path, "content": content, "chars": len(content)}
 
 
-@mcp.tool(name="write_file", description="Write UTF-8 content to a file in the workspace. Side-effecting.")
-def write_file(file_path: str, content: str) -> dict[str, Any]:
-    return _client.write_file(file_path, content)
+@mcp.tool(name="write_file", description="Write complete UTF-8 content, or set append=true to add only a focused snippet while preserving existing content. Large reductions to an existing file are rejected when they look like a truncated response. Set allow_shrink=true only for intentional large removals. Side-effecting.")
+def write_file(
+    file_path: str,
+    content: str,
+    allow_shrink: bool = False,
+    append: bool = False,
+) -> dict[str, Any]:
+    return _client.write_file(
+        file_path,
+        content,
+        allow_shrink=allow_shrink,
+        append=append,
+    )
 
 
 @mcp.tool(name="search_files", description="Find workspace files whose name contains a query string.")
@@ -38,7 +48,7 @@ def search_files(query: str, relative_path: str = ".") -> dict[str, Any]:
     return {"matches": matches, "count": len(matches)}
 
 
-@mcp.tool(name="run_command", description="Run a shell command inside the workspace. Side-effecting.")
+@mcp.tool(name="run_command", description="Run one exact allowlisted validation command inside the workspace. Shell syntax and command chains are rejected.")
 def run_command(command: str) -> dict[str, Any]:
     return _client.run_command(command)
 

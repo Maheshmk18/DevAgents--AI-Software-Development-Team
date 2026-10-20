@@ -54,8 +54,13 @@ def server_environment() -> dict[str, str]:
     # Credentials / workspace are forwarded so the servers behave like the backend.
     environment["REPO_ROOT"] = settings.repo_root
     environment["GMAIL_ACCESS_TOKEN"] = settings.gmail_access_token
+    environment["GMAIL_REFRESH_TOKEN"] = settings.gmail_refresh_token
+    environment["GOOGLE_CLIENT_ID"] = settings.google_client_id
+    environment["GOOGLE_CLIENT_SECRET"] = settings.google_client_secret
     environment["GMAIL_SENDER_EMAIL"] = settings.gmail_sender_email
     environment["GITHUB_TOKEN"] = settings.github_token
+    environment["GITHUB_OAUTH_CLIENT_ID"] = settings.github_oauth_client_id
+    environment["GITHUB_OAUTH_CLIENT_SECRET"] = settings.github_oauth_client_secret
     return environment
 
 

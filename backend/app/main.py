@@ -4,6 +4,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.approval_routes import router as approval_router
+from app.api.connectors_routes import router as connectors_router
 from app.api.evaluation_routes import router as evaluation_router
 from app.api.mcp_routes import router as mcp_router
 from app.api.routes import router as api_router
@@ -24,6 +25,7 @@ app.add_middleware(
 
 app.include_router(api_router)
 app.include_router(approval_router)
+app.include_router(connectors_router)
 app.include_router(tools_router)
 app.include_router(evaluation_router)
 app.include_router(mcp_router)

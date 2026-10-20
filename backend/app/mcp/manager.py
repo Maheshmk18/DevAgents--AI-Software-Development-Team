@@ -21,7 +21,7 @@ from mcp import ClientSession
 
 from app.mcp.client import SERVER_NAMES, extract_result, stdio_parameters
 
-_DEFAULT_TIMEOUT = 60.0
+_DEFAULT_TIMEOUT = 20.0
 _MAX_START_ATTEMPTS = 2
 
 

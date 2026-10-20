@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import copy
 from typing import Any
 
 from app.config import settings
 from app.integrations.github import GitHubClient
 from app.integrations.gmail import GmailClient
+from app.services.agent_run_context import active_repository_root, active_repository_slug
 from app.mcp.manager import get_mcp_manager
 from app.mcp.repository import RepositoryMCPClient
 
@@ -20,15 +22,22 @@ READ_ONLY_TOOLS: frozenset[str] = frozenset(
     }
 )
 
-#: Tools with side effects. Agents may request them but must never run them
-#: automatically; they are surfaced as manual follow-ups for the human.
+#: Tools that can mutate state. Repository writes and allowlisted commands are
+#: confined to an isolated, unpushed run branch and shown in the final diff;
+#: external-service actions are deferred to the delivery approval gate.
 SIDE_EFFECTING_TOOLS: frozenset[str] = frozenset(
     {
         "repo.write_file",
         "repo.run_command",
         "gmail.send_email",
         "github.create_issue",
+        "github.create_pull_request",
     }
+)
+
+# Only actions that reach a third-party service wait for the final human gate.
+HUMAN_APPROVAL_TOOLS: frozenset[str] = frozenset(
+    {"gmail.send_email", "github.create_issue", "github.create_pull_request"}
 )
 
 #: Which MCP server owns each tool. The MCP tool name is the part after the dot.
@@ -48,6 +57,60 @@ SERVER_FOR_TOOL: dict[str, str] = {
 #: LLM function-call names may not contain dots, so canonical tool names are
 #: mangled when handed to the model: ``repo.list_files`` -> ``repo__list_files``.
 FUNCTION_NAME_SEPARATOR = "__"
+
+#: Values a model tends to invent when it does not know which repository to use.
+_PLACEHOLDER_VALUES: frozenset[str] = frozenset(
+    {
+        "",
+        "placeholder",
+        "owner",
+        "repo",
+        "repository",
+        "example",
+        "your-org",
+        "your-repo",
+        "your_org",
+        "my-org",
+        "my-repo",
+        "unknown",
+        "none",
+    }
+)
+
+
+def default_repo_parts() -> tuple[str, str]:
+    """Return the selected OAuth repo, or the configured ``GITHUB_REPO`` fallback."""
+    from app.services import credential_store
+    from app.services.credential_store import CredentialStoreError
+
+    try:
+        credentials = credential_store.get_credentials("github")
+    except CredentialStoreError:
+        credentials = None
+    slug = str((credentials or {}).get("default_repo") or settings.github_repo or "").strip().strip("/")
+    if "/" not in slug:
+        return "", ""
+    owner, _, repo = slug.partition("/")
+    return owner.strip(), repo.strip()
+
+
+def resolve_repo_arguments(tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    """Force every GitHub call to the repository selected for this workspace."""
+    if not tool_name.startswith("github."):
+        return arguments
+    run_repository = active_repository_slug()
+    if run_repository and "/" in run_repository:
+        owner, _, repo = run_repository.partition("/")
+    else:
+        owner, repo = default_repo_parts()
+    if not owner or not repo:
+        return arguments
+    resolved = dict(arguments)
+    # Do not let an agent-supplied owner/repo accidentally send a read or
+    # deferred action to a different repository than the user selected.
+    resolved["owner"] = owner
+    resolved["repo"] = repo
+    return resolved
 
 
 def tool_to_function_name(tool_name: str) -> str:
@@ -109,17 +172,19 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
     ),
     "repo.write_file": _tool_schema(
         "repo.write_file",
-        "Write UTF-8 content to a repository file. Side-effecting: requires human approval.",
+        "Write complete UTF-8 file content inside the isolated workspace, or set append=true to add a focused snippet while preserving the existing file. Large reductions to an existing file are rejected as possible truncation. Set allow_shrink=true only for intentional large removals.",
         {
             "file_path": {"type": "string", "description": "Path to the file relative to the repo root."},
-            "content": {"type": "string", "description": "Full file content to write."},
+            "content": {"type": "string", "description": "Full file content, or only the new snippet when append=true."},
+            "allow_shrink": {"type": "boolean", "description": "Set true only when the user explicitly requested a substantial removal or replacement."},
+            "append": {"type": "boolean", "description": "Set true to append only the new snippet, preserving all existing file content. Use for additive changes to existing files."},
         },
         ("file_path", "content"),
     ),
     "repo.run_command": _tool_schema(
         "repo.run_command",
-        "Run a shell command inside the repository. Side-effecting: requires human approval.",
-        {"command": {"type": "string", "description": "The shell command to run."}},
+        "Run one exact allowlisted project validation command. Shell syntax, command chains, and unsupported commands are rejected. For backend tests use exactly: python -m pytest backend/tests -q.",
+        {"command": {"type": "string", "description": "Exact supported validation command; do not add shell syntax or chain commands."}},
         ("command",),
     ),
     "github.get_repository": _tool_schema(
@@ -191,6 +256,39 @@ def _unwrap(tool_name: str, value: Any) -> Any:
     return value
 
 
+def _apply_github_defaults(schema: dict[str, Any]) -> dict[str, Any]:
+    """Advertise the configured default repository inside a GitHub tool schema.
+
+    Without this the model has no idea which repository to inspect and calls the
+    tool with placeholders; the schema both names the repository and relaxes the
+    ``owner``/``repo`` requirement once a default exists.
+    """
+    function = schema.get("function", {})
+    if not str(function.get("name", "")).startswith("github"):
+        return schema
+    owner, repo = default_repo_parts()
+    if not owner or not repo:
+        return schema
+
+    patched = copy.deepcopy(schema)
+    patched_function = patched["function"]
+    parameters = patched_function["parameters"]
+    properties = parameters["properties"]
+
+    if "owner" in properties:
+        properties["owner"]["description"] = f"Repository owner or organisation. Defaults to '{owner}'."
+    if "repo" in properties:
+        properties["repo"]["description"] = f"Repository name. Defaults to '{repo}'."
+
+    patched_function["description"] = (
+        f"{patched_function['description']} Target repository: {owner}/{repo}."
+    )
+    parameters["required"] = [
+        item for item in parameters.get("required", []) if item not in ("owner", "repo")
+    ]
+    return patched
+
+
 class MCPToolRegistry:
     def __init__(self, use_mcp: bool | None = None) -> None:
         self.clients = {
@@ -209,15 +307,33 @@ class MCPToolRegistry:
     def is_side_effecting(tool_name: str) -> bool:
         return tool_name in SIDE_EFFECTING_TOOLS
 
+    @staticmethod
+    def requires_human_approval(tool_name: str) -> bool:
+        return tool_name in HUMAN_APPROVAL_TOOLS
+
+    @staticmethod
+    def can_run_automatically(tool_name: str, arguments: dict[str, Any]) -> bool:
+        if tool_name in READ_ONLY_TOOLS:
+            return True
+        if tool_name == "repo.write_file":
+            # A code write is automatic only inside the branch cloned for an
+            # approved run. Unscoped agent calls cannot mutate the base repo.
+            return active_repository_root() is not None
+        if tool_name == "repo.run_command":
+            return active_repository_root() is not None and RepositoryMCPClient.is_safe_validation_command(
+                str(arguments.get("command") or "")
+            )
+        return False
+
     def server_for(self, tool_name: str) -> str | None:
         return SERVER_FOR_TOOL.get(tool_name)
 
     def get_tools_for_agent(self, agent_name: str) -> list[str]:
         mapping = {
             "planner": ["repo.list_files", "repo.search_files", "github.get_repository"],
-            "developer": ["repo.read_file", "repo.write_file", "repo.run_command", "repo.list_files", "github.get_repository"],
-            "reviewer": ["repo.read_file", "repo.run_command", "github.list_pull_requests"],
-            "tester": ["repo.run_command", "github.list_pull_requests"],
+            "developer": ["repo.read_file", "repo.write_file", "repo.list_files", "repo.search_files"],
+            "reviewer": ["repo.read_file"],
+            "tester": ["repo.run_command"],
             "docs": ["repo.read_file", "repo.write_file", "gmail.send_email", "github.create_issue"],
         }
         return mapping.get(agent_name, [])
@@ -225,7 +341,7 @@ class MCPToolRegistry:
     def get_tool_schemas_for_agent(self, agent_name: str) -> list[dict[str, Any]]:
         """Function-calling schemas for exactly the tools this agent may use."""
         return [
-            TOOL_SCHEMAS[tool_name]
+            _apply_github_defaults(TOOL_SCHEMAS[tool_name])
             for tool_name in self.get_tools_for_agent(agent_name)
             if tool_name in TOOL_SCHEMAS
         ]
@@ -235,13 +351,14 @@ class MCPToolRegistry:
             {"name": "repo.list_files", "description": "List repository files and project structure."},
             {"name": "repo.search_files", "description": "Search the worktree for text patterns and symbols."},
             {"name": "repo.read_file", "description": "Read file content from the repository."},
-            {"name": "repo.write_file", "description": "Write file content into the repository."},
-            {"name": "repo.run_command", "description": "Execute a safe shell command in the repo context."},
+            {"name": "repo.write_file", "description": "Write or safely append file content in the repository."},
+            {"name": "repo.run_command", "description": "Execute one exact supported validation command in the repo context."},
             {"name": "gmail.list_messages", "description": "List recent Gmail messages for follow-ups and outreach."},
             {"name": "gmail.send_email", "description": "Send a Gmail message using the configured account."},
             {"name": "github.get_repository", "description": "Fetch repository metadata and default branch data from GitHub."},
             {"name": "github.list_pull_requests", "description": "Inspect open or closed pull requests for a repository."},
             {"name": "github.create_issue", "description": "Create a GitHub issue for a tracked task or bug."},
+            {"name": "github.create_pull_request", "description": "Publish an approved run branch as a pull request."},
         ]
 
     def _call_direct(self, tool_name: str, arguments: dict[str, Any]) -> Any:
@@ -253,8 +370,10 @@ class MCPToolRegistry:
 
     def call_tool_with_meta(self, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         """Call a tool, reporting whether it ran over MCP or in-process."""
+        arguments = resolve_repo_arguments(tool_name, arguments)
         server = self.server_for(tool_name)
-        if self.use_mcp and server is not None:
+        scoped_workspace_tool = tool_name.startswith("repo.") and active_repository_root() is not None
+        if self.use_mcp and server is not None and not scoped_workspace_tool:
             try:
                 raw = self.manager.call_tool(server, tool_name.split(".", 1)[1], arguments)
                 return {"result": _unwrap(tool_name, raw), "via": "mcp", "server": server}

@@ -3,11 +3,22 @@ from __future__ import annotations
 import re
 from datetime import datetime, timezone
 from typing import Any
+from uuid import uuid4
 
 from app.core.util import truncate
-from app.agents.runtime import AgentRuntime
+from app.agents.runtime import AgentRuntime, publish_tool_event
 from app.mcp.tool_registry import MCPToolRegistry
 from app.workflow.state import DevTeamState
+
+# Role-specific caps keep agents focused while leaving enough turns for the
+# normal inspect, edit, and response cycle.
+AGENT_TOOL_STEP_BUDGETS = {
+    "planner": 4,
+    "developer": 6,
+    "reviewer": 3,
+    "tester": 2,
+    "docs": 3,
+}
 
 #: Matches file-like tokens in a request, e.g. "app/main.py" or "src/App.tsx".
 _PATH_PATTERN = re.compile(
@@ -42,10 +53,8 @@ class BaseAgent:
     update. Every agent must contribute exactly one ``stage_results`` entry so
     the run history stays reviewable.
 
-    Tool policy: an agent only auto-runs tools that are **allowed for its role**
-    *and* marked read-only. Side-effecting tools (writes, shell commands,
-    outbound email, issue creation) are returned as ``deferred`` proposals so a
-    human can approve them later — they are never executed automatically.
+    Tool policy: workspace reads/writes and allowlisted validation run in the
+    backend. External GitHub and Gmail actions wait for the final human gate.
     """
 
     name: str = "base"
@@ -60,12 +69,7 @@ class BaseAgent:
         self,
         calls: list[tuple[str, dict[str, Any]]],
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-        """Run allowed read-only tools.
-
-        Returns ``(events, deferred)`` where ``events`` records executed
-        read-only calls and ``deferred`` holds side-effecting proposals that
-        carry the exact arguments a human would approve.
-        """
+        """Run workspace-safe tools and defer external actions."""
         allowed = set(self.registry.get_tools_for_agent(self.name))
         events: list[dict[str, Any]] = []
         deferred: list[dict[str, Any]] = []
@@ -73,25 +77,81 @@ class BaseAgent:
         for tool_name, arguments in calls:
             if tool_name not in allowed:
                 continue
-            if not self.registry.is_read_only(tool_name):
-                deferred.append({"agent": self.name, "tool": tool_name, "arguments": arguments})
-                continue
-            try:
-                meta = self.registry.call_tool_with_meta(tool_name, arguments)
-                event: dict[str, Any] = {
+            event_id = uuid4().hex
+            if self.registry.requires_human_approval(tool_name):
+                deferred.append({
+                    "event_id": event_id,
                     "agent": self.name,
                     "tool": tool_name,
-                    "status": "ok",
-                    "via": meta.get("via"),
-                    "result": truncate(meta.get("result")),
+                    "arguments": arguments,
+                })
+                event = {
+                    "event_id": event_id,
+                    "agent": self.name,
+                    "tool": tool_name,
+                    "status": "awaiting_approval",
+                    "arguments": arguments,
                 }
+                events.append(event)
+                publish_tool_event(event)
+                continue
+            if not self.registry.can_run_automatically(tool_name, arguments):
+                event = {
+                    "event_id": event_id,
+                    "agent": self.name,
+                    "tool": tool_name,
+                    "status": "blocked",
+                    "arguments": arguments,
+                    "error": "This tool call is outside the workspace or validation allowlist.",
+                }
+                events.append(event)
+                publish_tool_event(event)
+                continue
+            publish_tool_event({
+                "event_id": event_id,
+                "agent": self.name,
+                "tool": tool_name,
+                "status": "running",
+                "arguments": arguments,
+            })
+            try:
+                meta = self.registry.call_tool_with_meta(tool_name, arguments)
+                result = meta.get("result")
+                command_failed = (
+                    tool_name == "repo.run_command"
+                    and isinstance(result, dict)
+                    and result.get("return_code") != 0
+                )
+                event: dict[str, Any] = {
+                    "event_id": event_id,
+                    "agent": self.name,
+                    "tool": tool_name,
+                    "status": "error" if command_failed else (
+                        "executed" if tool_name in {"repo.write_file", "repo.run_command"} else "ok"
+                    ),
+                    "arguments": arguments,
+                    "via": meta.get("via"),
+                    "result": truncate(result),
+                }
+                if command_failed:
+                    event["error"] = str(
+                        result.get("stderr") or result.get("stdout") or "Validation command failed."
+                    )[:1200]
                 if meta.get("mcp_error"):
                     event["mcp_error"] = meta["mcp_error"]
                 events.append(event)
+                publish_tool_event(event)
             except Exception as exc:  # never let a tool failure break the run
-                events.append(
-                    {"agent": self.name, "tool": tool_name, "status": "error", "error": str(exc)}
-                )
+                event = {
+                    "event_id": event_id,
+                    "agent": self.name,
+                    "tool": tool_name,
+                    "status": "error",
+                    "arguments": arguments,
+                    "error": str(exc),
+                }
+                events.append(event)
+                publish_tool_event(event)
         return events, deferred
 
     def stage_entry(
@@ -118,18 +178,26 @@ class BaseAgent:
         fallback_calls: list[tuple[str, dict[str, Any]]],
         fallback_summary: str,
         details: dict[str, Any] | None = None,
+        force_initial_tool_call: bool = False,
+        tool_allowlist: list[str] | None = None,
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         """Run the agent's LLM tool-calling loop, or fall back deterministically.
 
         When an LLM is configured the model decides which of the agent's tools
-        to call (read-only calls run immediately, side-effecting ones become
-        deferred proposals). With no LLM the agent still does something useful
+        to call (workspace-safe calls run immediately, external actions are
+        deferred). With no LLM the agent still does something useful
         via ``fallback_calls`` so the workflow never dead-ends offline.
 
         Returns ``(stage_entry, tool_events)``.
         """
         runtime = AgentRuntime(self.name, self.registry)
-        turn = runtime.run(system_prompt, user_prompt)
+        turn = runtime.run(
+            system_prompt,
+            user_prompt,
+            max_steps=AGENT_TOOL_STEP_BUDGETS.get(self.name, 4),
+            force_initial_tool_call=force_initial_tool_call,
+            tool_allowlist=tool_allowlist,
+        )
 
         merged: dict[str, Any] = dict(details or {})
         if turn is None:
