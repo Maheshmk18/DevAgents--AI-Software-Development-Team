@@ -116,22 +116,35 @@ class TestingAgent(BaseAgent):
                 for changed_path in changed_source_paths
                 for source_path in collection_error_paths
             )
-            repairable = matching_collection_source if collection_failed else (
+            changed_test_files = [path for path in changed_files if _is_test_path(path)]
+            matching_collection_test = any(
+                _paths_match(changed_path, error_path)
+                for changed_path in changed_test_files
+                for error_path in collection_error_paths
+            )
+            matching_collection_change = matching_collection_source or matching_collection_test
+            repairable = matching_collection_change if collection_failed else (
                 not changed_test_paths or not failed_test_paths or bool(matching_failures)
             )
             entry["status"] = "validation_failed"
             entry.setdefault("details", {})["repairable"] = repairable
             entry["details"]["collection_failed"] = collection_failed
             entry["details"]["collection_error_paths"] = collection_error_paths
+            entry["details"]["matching_collection_change"] = matching_collection_change
             entry.setdefault("details", {})["failed_test_paths"] = sorted(failed_test_paths)
             if collection_failed and matching_collection_source:
                 entry["summary"] = (
                     "Pytest could not collect the backend tests because a changed source file has a syntax or import error. "
                     "The developer will repair that file and validation will retry."
                 )
+            elif collection_failed and matching_collection_test:
+                entry["summary"] = (
+                    "Pytest could not collect the backend tests because a changed test file has a syntax or import error. "
+                    "The developer will repair that file and validation will retry."
+                )
             elif collection_failed:
                 entry["summary"] = (
-                    "Pytest could not collect the backend tests because of a syntax or import error outside the changed source files. "
+                    "Pytest could not collect the backend tests because of a syntax or import error outside the changed files. "
                     "Review the collection diagnostic before retrying."
                 )
             elif changed_test_paths and failed_test_paths and not matching_failures:
