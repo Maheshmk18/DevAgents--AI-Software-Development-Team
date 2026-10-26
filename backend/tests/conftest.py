@@ -24,9 +24,11 @@ _BACKEND_ROOT = str(Path(__file__).resolve().parents[1])
 if _BACKEND_ROOT not in sys.path:
     sys.path.insert(0, _BACKEND_ROOT)
 
-# pytest's default per-user temp directory can be inaccessible in restricted
-# Windows environments. Keep pytest temp files inside this checkout instead.
-_TEST_TEMP_ROOT = Path(_BACKEND_ROOT) / ".pytest-tmp"
+# Keep pytest's temporary workspace short. Some tests create nested Git
+# repositories, and rooting those under a workflow clone can exceed Windows'
+# path limit while Git writes objects into ``.git/objects``.
+_SYSTEM_TEMP_ROOT = Path(tempfile.gettempdir())
+_TEST_TEMP_ROOT = _SYSTEM_TEMP_ROOT / f"adpytest-{os.getpid()}"
 _TEST_TEMP_ROOT.mkdir(parents=True, exist_ok=True)
 for _temp_var in ("TEMP", "TMP", "TMPDIR"):
     os.environ[_temp_var] = str(_TEST_TEMP_ROOT)
