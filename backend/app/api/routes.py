@@ -86,3 +86,11 @@ async def delete_run(run_id: str) -> dict[str, Any]:
 @router.get("/agents")
 async def list_agents() -> list[str]:
     return ["planner", "developer", "reviewer", "tester", "docs"]
+
+@router.get(
+    "/hello",
+    summary="Hello endpoint",
+    description='Returns the fixed response `{ "message": "Agent workflow works" }`.',
+)
+async def hello() -> dict[str, str]:
+    return {"message": "Agent workflow works"}
