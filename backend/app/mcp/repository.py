@@ -237,9 +237,63 @@ class RepositoryMCPClient:
                 "stderr": f"Command timed out after {effective_timeout}s.",
                 "timed_out": True,
             }
+        output = "\n".join(part for part in (result.stdout, result.stderr) if part).strip()
+        failure_ids: list[str] = []
+        collection_error_paths: list[str] = []
+        for line in output.splitlines():
+            summary_line = line.strip()
+            source_match = re.search(r'''File [\"']([^\"']+\.py)[\"'], line \d+''', line)
+            if source_match and source_match.group(1) not in collection_error_paths:
+                collection_error_paths.append(source_match.group(1))
+            if not summary_line.startswith(("FAILED ", "ERROR ")):
+                continue
+            identifier = summary_line.split(None, 1)[1].split(" - ", 1)[0].strip()
+            if ".py" in identifier and identifier not in failure_ids:
+                failure_ids.append(identifier)
+
+        collection_failed = bool(
+            re.search(r"(?im)^.*ERROR collecting .*\.py", output)
+            or re.search(r"(?im)^.*Interrupted: \d+ errors? during collection", output)
+        )
+        summary_match = re.search(
+            r"(?im)^=+\s*short test summary info\s*=+\s*$",
+            output,
+        )
+        diagnostic_parts: list[str] = []
+        if collection_failed:
+            lines = output.splitlines()
+            collection_headers = [
+                line.strip()
+                for line in lines
+                if "ERROR collecting " in line
+            ][:8]
+            exceptions: list[str] = []
+            for index, line in enumerate(lines):
+                if re.search(
+                    r"\b(?:SyntaxError|IndentationError|ImportError|ModuleNotFoundError):",
+                    line,
+                ):
+                    excerpt = "\n".join(lines[max(0, index - 4):index + 1]).strip()
+                    if excerpt and excerpt not in exceptions:
+                        exceptions.append(excerpt)
+                    if len(exceptions) >= 3:
+                        break
+            diagnostic_parts.extend(exceptions[:1])
+            diagnostic_parts.extend(collection_headers[:4])
+        if summary_match:
+            diagnostic_parts.append(output[summary_match.start():][-3000:])
+        elif not diagnostic_parts and result.returncode:
+            diagnostic_parts.append(output[-3000:])
+        # Keep the actionable exception before the summary so tool-event
+        # truncation retains the cause of collection failures.
+        diagnostic = "\n".join(part for part in diagnostic_parts if part).strip()[:6000]
         return {
             "command": command,
             "return_code": result.returncode,
+            "failed_test_ids": failure_ids,
+            "collection_failed": collection_failed,
+            "collection_error_paths": collection_error_paths,
+            "diagnostic": diagnostic,
             "stdout": result.stdout[:20000],
             "stderr": result.stderr[:20000],
             "timed_out": False,

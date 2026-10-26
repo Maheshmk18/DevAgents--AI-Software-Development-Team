@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import sys
+import tempfile
 from pathlib import Path
 
 # Settings loads ``backend/.env`` during import. A developer's local file may
@@ -23,10 +24,19 @@ _BACKEND_ROOT = str(Path(__file__).resolve().parents[1])
 if _BACKEND_ROOT not in sys.path:
     sys.path.insert(0, _BACKEND_ROOT)
 
+# pytest's default per-user temp directory can be inaccessible in restricted
+# Windows environments. Keep pytest temp files inside this checkout instead.
+_TEST_TEMP_ROOT = Path(_BACKEND_ROOT) / ".pytest-tmp"
+_TEST_TEMP_ROOT.mkdir(parents=True, exist_ok=True)
+for _temp_var in ("TEMP", "TMP", "TMPDIR"):
+    os.environ[_temp_var] = str(_TEST_TEMP_ROOT)
+tempfile.tempdir = str(_TEST_TEMP_ROOT)
+
 import pytest
 
 from app import db
 from app.config import settings
+from app.services import credential_store
 from app.services.llm_service import llm_service
 
 
@@ -50,6 +60,10 @@ def hermetic_environment(monkeypatch: pytest.MonkeyPatch) -> None:
 
     # Route every tool call through the in-process clients instead of stdio MCP.
     monkeypatch.setattr(settings, "mcp_enabled", False)
+
+    # Do not let tests read real OAuth tokens from Windows Credential Manager.
+    # Individual tests can stub this function when they need stored credentials.
+    monkeypatch.setattr(credential_store, "get_credentials", lambda provider: None)
 
     # Make Mongo look unreachable without any network I/O, so the DB helpers
     # take their in-memory path immediately.

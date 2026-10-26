@@ -436,14 +436,33 @@ class WorkflowService:
             "tester": "validated",
             "docs": "documented",
         }
-        report_blocked = any(
-            event.get("tool") in {"repo.write_file", "repo.run_command"}
-            and event.get("status") in {"error", "blocked"}
-            for event in execution_result.get("tool_events", [])
-        ) or any(
+        tool_events = execution_result.get("tool_events", [])
+        # A test command may fail, send the developer to repair the change, and
+        # then pass on the bounded retry. Keep the original failure in the run
+        # history, but do not let that stale event veto delivery after the final
+        # tester stage passed. Unrecovered file-write errors still block review.
+        unresolved_write_failures: list[dict[str, Any]] = []
+        for index, event in enumerate(tool_events):
+            if (
+                event.get("tool") != "repo.write_file"
+                or event.get("status") not in {"error", "blocked"}
+            ):
+                continue
+            failed_path = (event.get("arguments") or {}).get("file_path")
+            recovered_later = bool(failed_path) and any(
+                later.get("tool") == "repo.write_file"
+                and (later.get("arguments") or {}).get("file_path") == failed_path
+                and later.get("status") in {"executed", "ok", "recovered"}
+                for later in tool_events[index + 1 :]
+            )
+            if not recovered_later:
+                unresolved_write_failures.append(event)
+
+        required_stages_failed = any(
             latest_stages.get(agent, {}).get("status") != expected
             for agent, expected in required_stage_statuses.items()
         )
+        report_blocked = bool(unresolved_write_failures) or required_stages_failed
         written_paths = []
         for event in execution_result.get("tool_events", []):
             if event.get("tool") != "repo.write_file" or event.get("status") not in {"executed", "ok"}:
@@ -460,9 +479,7 @@ class WorkflowService:
             ]
             failed_tools = [
                 f"{event.get('tool')}: {event.get('error') or 'tool call failed'}"
-                for event in execution_result.get("tool_events", [])
-                if event.get("tool") in {"repo.write_file", "repo.run_command"}
-                and event.get("status") in {"error", "blocked"}
+                for event in unresolved_write_failures
             ]
             details = "; ".join([*failed_stages, *failed_tools])[:700]
             raise RuntimeError(

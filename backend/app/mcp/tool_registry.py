@@ -334,7 +334,10 @@ class MCPToolRegistry:
             "developer": ["repo.read_file", "repo.write_file", "repo.list_files", "repo.search_files"],
             "reviewer": ["repo.read_file"],
             "tester": ["repo.run_command"],
-            "docs": ["repo.read_file", "repo.write_file", "gmail.send_email", "github.create_issue"],
+            # Documentation can rely on the run evidence already in graph state;
+            # reading repository files here burns the small docs tool budget and
+            # has repeatedly prevented the required report write.
+            "docs": ["repo.write_file", "gmail.send_email", "github.create_issue"],
         }
         return mapping.get(agent_name, [])
 

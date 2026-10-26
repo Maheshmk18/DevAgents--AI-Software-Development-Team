@@ -18,6 +18,9 @@ SYSTEM_PROMPT = (
     "How to work:\n"
     "- Review only the changed files using repo.read_file. The tool results are "
     "the source of truth for the workspace.\n"
+    "- Read only the additional files needed to verify imports and route wiring. "
+    "Do not inspect conftest.py unless the changed test uses a shared fixture. "
+    "Do not search or list unrelated repository files.\n"
     "- For FastAPI endpoint changes, trace the router prefix and app registration to "
     "confirm the exact requested URL is reachable. Do not approve a route that is "
     "defined in an unregistered router or that the endpoint test would return 404 for.\n"
@@ -47,10 +50,10 @@ class ReviewAgent(BaseAgent):
             and event.get("status") == "executed"
             and event.get("arguments", {}).get("file_path")
         ]
-        target_files = list(dict.fromkeys([
-            *extract_path_tokens(state.get("request", "")),
-            *changed_files,
-        ]))
+        # When the developer has written files, review those exact paths. A
+        # filename merely mentioned in the request may not exist and should not
+        # make an otherwise valid review fail.
+        target_files = list(dict.fromkeys(changed_files or extract_path_tokens(state.get("request", ""))))
         fallback_calls: list[tuple[str, dict[str, Any]]] = [
             ("repo.read_file", {"file_path": path}) for path in target_files
         ]
@@ -67,11 +70,7 @@ class ReviewAgent(BaseAgent):
 
         if turn is None:
             events, deferred = self.invoke_tools(fallback_calls)
-            validation_errors = [
-                event for event in events
-                if event.get("tool") == "repo.read_file"
-                and event.get("status") in {"error", "blocked"}
-            ]
+            validation_errors = self._unreadable_files(events)
             passed = deterministic_pass and not validation_errors
             summary = (
                 "Review passed: the implementation is ready for validation."
@@ -91,14 +90,17 @@ class ReviewAgent(BaseAgent):
                 else "Review requested changes to the implementation."
             )
             passed = self._verdict(summary, default=deterministic_pass)
-            validation_errors = [
-                event for event in events
-                if event.get("tool") == "repo.read_file"
-                and event.get("status") in {"error", "blocked"}
-            ]
+            validation_errors = self._unreadable_files(events)
             if validation_errors:
-                passed = False
-                summary = f"{summary}\nReview blocked because a changed file could not be read."
+                # Retry the actual changed files directly. The model may have
+                # hit its tool-call cap or tried a stale path; neither means
+                # the developer's files are missing from the workspace.
+                retry_events, _ = self.invoke_tools(fallback_calls)
+                events.extend(retry_events)
+                validation_errors = self._unreadable_files(retry_events)
+                if validation_errors:
+                    passed = False
+                    summary = f"{summary}\nReview blocked because a changed file could not be read after retry."
             engine = "llm"
 
         entry = self.stage_entry(
@@ -126,3 +128,16 @@ class ReviewAgent(BaseAgent):
             return default
         verdict = match.group(1).upper().replace(" ", "_")
         return verdict != "CHANGES_REQUESTED"
+
+    @staticmethod
+    def _unreadable_files(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Return failed reads and empty results for the paths under review."""
+        return [
+            event
+            for event in events
+            if event.get("tool") == "repo.read_file"
+            and (
+                event.get("status") in {"error", "blocked"}
+                or not str(event.get("result") or "").strip()
+            )
+        ]

@@ -14,6 +14,7 @@ from app.workflow.state import DevTeamState
 #: How many times the reviewer may send work back to the developer before the
 #: run is allowed to continue to validation. Keeps the loop bounded.
 MAX_REVIEW_ATTEMPTS = 2
+MAX_VALIDATION_ATTEMPTS = 2
 
 
 def _agent_node(agent_name: str) -> Callable[[DevTeamState], dict[str, Any]]:
@@ -31,12 +32,27 @@ def route_after_review(state: DevTeamState) -> str:
     if state.get("review_passed", True):
         return "tester"
     if state.get("review_attempts", 0) >= MAX_REVIEW_ATTEMPTS:
-        return "tester"
+        return "review_halt"
     return "developer"
 
 
+def route_after_tester(state: DevTeamState) -> str:
+    """Give the developer one bounded repair pass when validation fails."""
+    tester = last_stage_result(state, "tester") or {}
+    if tester.get("status") == "validated":
+        return "docs"
+    if (tester.get("details") or {}).get("repairable") is False:
+        return "validation_halt"
+
+    attempts = sum(
+        1 for stage in state.get("stage_results", [])
+        if stage.get("agent") == "tester"
+    )
+    return "developer" if attempts < MAX_VALIDATION_ATTEMPTS else "validation_halt"
+
+
 def route_after_developer(state: DevTeamState) -> str:
-    """Do not spend more agent calls reviewing work that was never written."""
+    """Do not spend a review call when the developer produced no change."""
     developer = last_stage_result(state, "developer")
     if developer and developer.get("status") == "implementation_ready":
         return "reviewer"
@@ -52,6 +68,32 @@ def implementation_halt_node(state: DevTeamState) -> dict[str, Any]:
         "current_stage": "implementation_halt",
         "status": "failed",
         "final_answer": f"Workflow stopped after implementation because no reviewable change was produced. {summary}",
+    }
+
+
+def review_halt_node(state: DevTeamState) -> dict[str, Any]:
+    reviewer = last_stage_result(state, "reviewer") or {}
+    summary = str(reviewer.get("summary") or "The reviewer did not approve the changes.")
+    return {
+        "current_stage": "review_halt",
+        "status": "failed",
+        "final_answer": (
+            f"Workflow stopped after {MAX_REVIEW_ATTEMPTS} review attempts. "
+            f"{summary} No validation, documentation, or PR was produced."
+        ),
+    }
+
+
+def validation_halt_node(state: DevTeamState) -> dict[str, Any]:
+    tester = last_stage_result(state, "tester") or {}
+    summary = str(tester.get("summary") or "The validation checks did not pass.")
+    return {
+        "current_stage": "validation_halt",
+        "status": "failed",
+        "final_answer": (
+            f"Workflow stopped after {MAX_VALIDATION_ATTEMPTS} validation attempts. "
+            f"{summary} No documentation, PR, or Gmail report was created."
+        ),
     }
 
 
@@ -73,6 +115,7 @@ def build_workflow() -> Any:
     Flow:
         START -> planner -> developer -> reviewer
         reviewer --changes_requested--> developer   (bounded loop)
+        tester --failed--> developer                 (one bounded repair pass)
         developer --missing change--> implementation_halt -> END
         reviewer --passed--> tester -> docs -> finalize -> END
     """
@@ -82,6 +125,8 @@ def build_workflow() -> Any:
         graph.add_node(agent_name, _agent_node(agent_name))
     graph.add_node("finalize", finalize_node)
     graph.add_node("implementation_halt", implementation_halt_node)
+    graph.add_node("review_halt", review_halt_node)
+    graph.add_node("validation_halt", validation_halt_node)
 
     graph.add_edge(START, "planner")
     graph.add_edge("planner", "developer")
@@ -94,9 +139,23 @@ def build_workflow() -> Any:
     graph.add_conditional_edges(
         "reviewer",
         route_after_review,
-        {"developer": "developer", "tester": "tester"},
+        {
+            "developer": "developer",
+            "tester": "tester",
+            "review_halt": "review_halt",
+        },
     )
-    graph.add_edge("tester", "docs")
+    graph.add_edge("review_halt", END)
+    graph.add_conditional_edges(
+        "tester",
+        route_after_tester,
+        {
+            "developer": "developer",
+            "docs": "docs",
+            "validation_halt": "validation_halt",
+        },
+    )
+    graph.add_edge("validation_halt", END)
     graph.add_edge("docs", "finalize")
     graph.add_edge("finalize", END)
 

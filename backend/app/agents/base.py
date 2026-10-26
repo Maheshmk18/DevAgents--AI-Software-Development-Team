@@ -135,7 +135,10 @@ class BaseAgent:
                 }
                 if command_failed:
                     event["error"] = str(
-                        result.get("stderr") or result.get("stdout") or "Validation command failed."
+                        result.get("diagnostic")
+                        or result.get("stderr")
+                        or result.get("stdout")
+                        or "Validation command failed."
                     )[:1200]
                 if meta.get("mcp_error"):
                     event["mcp_error"] = meta["mcp_error"]

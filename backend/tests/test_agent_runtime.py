@@ -360,6 +360,25 @@ def test_developer_does_not_retry_without_llm(monkeypatch) -> None:
     assert "GROQ_API_KEY" in result["stage_results"][0]["summary"]
 
 
+def test_developer_receives_failed_validation_output() -> None:
+    feedback = DeveloperAgent._validation_feedback({
+        "stage_results": [{
+            "agent": "tester",
+            "status": "validation_failed",
+            "summary": "One or more validation commands failed.",
+        }],
+        "tool_events": [{
+            "agent": "tester",
+            "tool": "repo.run_command",
+            "status": "error",
+            "error": "GET /api/ping returned 404",
+        }],
+    })
+
+    assert "Do not only edit the test" in feedback
+    assert "GET /api/ping returned 404" in feedback
+
+
 def test_runtime_falls_back_when_the_provider_errors(monkeypatch) -> None:
     registry = MCPToolRegistry(use_mcp=False)
 

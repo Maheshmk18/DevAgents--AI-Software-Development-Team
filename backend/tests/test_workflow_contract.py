@@ -19,8 +19,10 @@ from app.mcp.tool_registry import MCPToolRegistry
 from app.services.execution_service import ExecutionService
 from app.workflow.graph import (
     MAX_REVIEW_ATTEMPTS,
+    MAX_VALIDATION_ATTEMPTS,
     build_workflow,
     route_after_review,
+    route_after_tester,
 )
 
 AGENTS = ("planner", "developer", "reviewer", "tester", "docs")
@@ -63,7 +65,10 @@ def test_no_browser_tool_survives_anywhere(registry: MCPToolRegistry) -> None:
 
 def test_graph_shape_has_agents_and_non_agent_finalizer() -> None:
     nodes = set(build_workflow().get_graph().nodes)
-    assert {"planner", "developer", "reviewer", "tester", "docs", "finalize"} <= nodes
+    assert {
+        "planner", "developer", "reviewer", "tester", "docs", "finalize",
+        "review_halt", "validation_halt",
+    } <= nodes
     assert not any("browser" in name for name in nodes)
 
 
@@ -73,8 +78,26 @@ def test_retry_loop_is_bounded() -> None:
     assert route_after_review({"review_passed": False, "review_attempts": 0}) == "developer"
     assert (
         route_after_review({"review_passed": False, "review_attempts": MAX_REVIEW_ATTEMPTS})
-        == "tester"
+        == "review_halt"
     )
+
+
+def test_failed_validation_gets_one_developer_repair_pass() -> None:
+    failed_once = {
+        "stage_results": [{"agent": "tester", "status": "validation_failed"}],
+    }
+    failed_twice = {
+        "stage_results": [
+            {"agent": "tester", "status": "validation_failed"},
+            {"agent": "tester", "status": "validation_failed"},
+        ],
+    }
+    passed = {"stage_results": [{"agent": "tester", "status": "validated"}]}
+
+    assert MAX_VALIDATION_ATTEMPTS == 2
+    assert route_after_tester(failed_once) == "developer"
+    assert route_after_tester(failed_twice) == "validation_halt"
+    assert route_after_tester(passed) == "docs"
 
 
 def test_deferred_actions_only_include_side_effects_and_deduplicate(registry: MCPToolRegistry) -> None:

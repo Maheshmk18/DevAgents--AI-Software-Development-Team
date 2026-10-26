@@ -19,7 +19,12 @@ SYSTEM_PROMPT = (
     "already defines the `/api` router and `backend/app/main.py` includes it, add the endpoint "
     "to that router instead of creating another router or changing `main.py`. If a separate "
     "router is necessary, register it with one complete `app.include_router(router)` call.\n"
+    "- Before adding a route, check whether an equivalent path and method already exist. "
+    "Update the existing handler instead of appending a duplicate endpoint.\n"
     "- Keep inspection focused: read the relevant files in one batch, then edit.\n"
+    "- When validation reports a Python syntax or import error, inspect the exact changed file "
+    "and line from the traceback, then make the smallest correction. Preserve unrelated code "
+    "and route descriptions; do not rewrite an entire file for a one-line repair.\n"
     "- Write complete changes with repo.write_file in the workspace. These changes "
     "are applied by the backend so the reviewer and tester can inspect them.\n"
     "- You own every requested code edit, including creating or updating test files. "
@@ -48,13 +53,13 @@ class DeveloperAgent(BaseAgent):
 
         target_files = extract_path_tokens(request)
         review_note = ""
-        if attempt > 1:
-            review = last_stage_result(state, "reviewer")
-            if review:
-                review_note = (
-                    "\nA previous attempt was sent back by the reviewer. "
-                    f"Address this feedback:\n{review.get('summary', '')}\n"
-                )
+        review = last_stage_result(state, "reviewer")
+        if review and review.get("status") == "changes_requested":
+            review_note = (
+                "\nA previous attempt was sent back by the reviewer. "
+                f"Address this feedback:\n{review.get('summary', '')}\n"
+            )
+        validation_note = self._validation_feedback(state)
 
         plan_lines = "\n".join(
             f"- {task.get('title', '')}" for task in plan if isinstance(task, dict)
@@ -66,6 +71,7 @@ class DeveloperAgent(BaseAgent):
             f"Planned tasks:\n{plan_lines or '(none)'}\n"
             f"Files named in the request: {', '.join(target_files) or '(none)'}\n"
             f"{review_note}\n"
+            f"{validation_note}\n"
             "Implement every requested change now, including requested test files. "
             "Read only the relevant files. For additive changes to an existing file, "
             "call repo.write_file with append=true and only the new snippet; for edits, "
@@ -173,6 +179,7 @@ class DeveloperAgent(BaseAgent):
                 f"Planned tasks:\n{plan_lines or '(none)'}\n"
                 f"Files named in the request: {', '.join(target_files) or '(none)'}\n"
                 f"{review_note}\n"
+                f"{validation_note}\n"
                 "RECOVERY REQUIRED: "
                 f"{recovery_instruction} This is recovery attempt {recovery_attempts} "
                 f"of {max_recovery_attempts}. Do not repeat inspection or summarize the plan. "
@@ -277,14 +284,45 @@ class DeveloperAgent(BaseAgent):
             )
         elif not writes:
             entry["status"] = "implementation_missing"
-            entry["summary"] = (
-                f"The developer still did not apply a file change after {recovery_attempts} "
-                "recovery attempt(s). "
-                "Review the tool activity and retry if needed."
-                if recovery_attempts
-                else "The developer did not apply a file change. Review the tool activity and retry if needed."
-            )
+            if recovery_attempts == 1:
+                entry["summary"] = (
+                    "The developer still did not apply a file change after one recovery attempt. "
+                    "Review the tool activity and retry if needed."
+                )
+            elif recovery_attempts > 1:
+                entry["summary"] = (
+                    f"The developer still did not apply a file change after {recovery_attempts} recovery attempts. "
+                    "Review the tool activity and retry if needed."
+                )
+            else:
+                entry["summary"] = (
+                    "The developer did not apply a file change. Review the tool activity and retry if needed."
+                )
         return {"current_stage": self.name, "tool_events": events, "stage_results": [entry]}
+
+    @staticmethod
+    def _validation_feedback(state: DevTeamState) -> str:
+        """Return the latest failed test output so a repair pass has useful context."""
+        tester = last_stage_result(state, "tester")
+        if not tester or tester.get("status") == "validated":
+            return ""
+
+        failures = [
+            event for event in state.get("tool_events", [])
+            if event.get("agent") == "tester"
+            and event.get("tool") == "repo.run_command"
+            and event.get("status") in {"error", "blocked"}
+        ]
+        detail = ""
+        if failures:
+            latest = failures[-1]
+            detail = str(latest.get("error") or latest.get("result") or "")[:3000]
+        detail = detail or str(tester.get("summary") or "The validation run failed.")
+        return (
+            "\nThe tester ran the checks and they failed. Fix the implementation that caused "
+            "the failure, then let review and validation run again. Do not only edit the test. "
+            f"Failure output:\n{detail}\n"
+        )
 
     @staticmethod
     def _successful_writes(events: list[dict[str, Any]]) -> list[dict[str, Any]]:

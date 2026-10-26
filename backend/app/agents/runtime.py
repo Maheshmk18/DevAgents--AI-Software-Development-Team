@@ -23,12 +23,14 @@ MAX_TOOL_STEPS = 6
 # round trips. Some providers return dozens of calls in one response.
 MAX_TOOL_CALLS_BY_AGENT = {
     # Leave room for the root view, focused directory listings, and searches.
-    "planner": 6,
+    "planner": 3,
     # A useful implementation may need several focused reads and separate writes.
     "developer": 8,
-    "reviewer": 4,
+    # Review may need to read the changed source, test, docs, and router wiring.
+    # Keep a little headroom for one relevant fixture/config file as well.
+    "reviewer": 6,
     "tester": 1,
-    "docs": 4,
+    "docs": 3,
 }
 
 #: How much of a tool result is fed back into the model conversation.
@@ -237,7 +239,10 @@ class AgentRuntime:
                     }
                     if command_failed:
                         event["error"] = str(
-                            result.get("stderr") or result.get("stdout") or "Validation command failed."
+                            result.get("diagnostic")
+                            or result.get("stderr")
+                            or result.get("stdout")
+                            or "Validation command failed."
                         )[:1200]
                     if meta.get("mcp_error"):
                         event["mcp_error"] = meta["mcp_error"]

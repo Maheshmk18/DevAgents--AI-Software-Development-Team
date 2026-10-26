@@ -113,6 +113,13 @@ class ExecutionService:
             deferred_actions.append(
                 self._final_report_action(request, stage_results, final_answer, report_recipient)
             )
+        else:
+            final_answer = (
+                str(final_answer).rstrip()
+                + "\n\nGmail report not queued: connect Gmail in the console Integrations settings, "
+                "then start a new run to receive the PDF report. Google sign-in alone does not "
+                "grant Gmail sending access."
+            )
         recorded_event_ids = {event.get("event_id") for event in tool_events}
         for action in deferred_actions:
             event_id = action.get("event_id")
