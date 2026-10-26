@@ -356,12 +356,12 @@ class DeveloperAgent(BaseAgent):
     @staticmethod
     def _requires_implementation_change(request: str) -> bool:
         feature_change = re.compile(
-            r"\b(?:add|create|implement|update|modify)\b.{0,80}"
+            r"\b(?:add|change|create|implement|update|modify)\b.{0,80}"
             r"\b(?:get|post|put|patch|delete)\s+/",
             re.IGNORECASE,
         )
         return any(
-            "test" not in sentence.casefold() and feature_change.search(sentence)
+            feature_change.search(sentence)
             for sentence in re.split(r"[.!?\n]+", request or "")
         )
 

@@ -3,12 +3,31 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from app.services import execution_service as execution_module
 from app.services import workflow_service as workflow_module
 from app.services.execution_service import ExecutionService
 from app.integrations.github import GitHubClient
 from app.services.github_workspace import GitHubWorkspaceService
 from app.services.workflow_service import WorkflowService
+
+
+@pytest.fixture
+def isolated_git_config(tmp_path: Path, monkeypatch):
+    config_path = tmp_path / "workflow-test-gitconfig"
+    config_path.write_text("", encoding="utf-8")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(config_path))
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+
+    def trust(*directories: Path) -> None:
+        for directory in directories:
+            subprocess.run(
+                ["git", "config", "--global", "--add", "safe.directory", str(directory.resolve())],
+                check=True,
+            )
+
+    return trust
 
 
 def _disable_database(monkeypatch, module=workflow_module) -> None:
@@ -427,7 +446,9 @@ def test_rejecting_optional_action_keeps_open_pr_waiting_for_review(monkeypatch)
     assert [result["status"] for result in run["action_results"]] == ["skipped"]
 
 
-def test_approved_delivery_commits_pushes_selected_branch_and_opens_pr_locally(tmp_path: Path, monkeypatch) -> None:
+def test_approved_delivery_commits_pushes_selected_branch_and_opens_pr_locally(
+    tmp_path: Path, monkeypatch, isolated_git_config
+) -> None:
     run_id = "d" * 32
     branch = f"agent/add-endpoint-{run_id[:8]}"
     service = GitHubWorkspaceService()
@@ -435,6 +456,7 @@ def test_approved_delivery_commits_pushes_selected_branch_and_opens_pr_locally(t
     root = service.storage_root / run_id
     root.mkdir(parents=True)
     remote = tmp_path / "selected-repo.git"
+    isolated_git_config(root, remote)
     subprocess.run(["git", "init", "--bare", "--quiet", str(remote)], check=True)
     subprocess.run(["git", "init", "--quiet", "--initial-branch=main", str(root)], check=True)
     subprocess.run(["git", "-C", str(root), "config", "user.name", "Test"], check=True)
@@ -484,13 +506,16 @@ def test_approved_delivery_commits_pushes_selected_branch_and_opens_pr_locally(t
     assert created_pr[0]["base"] == "main"
 
 
-def test_review_stages_all_code_changes_but_never_env_files(tmp_path: Path) -> None:
+def test_review_stages_all_code_changes_but_never_env_files(
+    tmp_path: Path, isolated_git_config
+) -> None:
     run_id = "b" * 32
     service = GitHubWorkspaceService()
     service.storage_root = tmp_path / "workspaces"
     root = service.storage_root / run_id
     (root / "src").mkdir(parents=True)
     (root / "src" / "api.py").write_text("value = 1\n", encoding="utf-8")
+    isolated_git_config(root)
     subprocess.run(["git", "init", "--quiet", str(root)], check=True)
     subprocess.run(["git", "-C", str(root), "add", "src/api.py"], check=True)
     subprocess.run(

@@ -299,6 +299,16 @@ def test_developer_retries_once_when_model_does_not_write(monkeypatch) -> None:
     ]
 
 
+def test_developer_requires_implementation_for_endpoint_and_test_request() -> None:
+    request = (
+        'Change GET /api/hello to return {"message":"Agent workflow works"} '
+        "and update its backend test."
+    )
+
+    assert DeveloperAgent._requires_implementation_change(request) is True
+    assert DeveloperAgent._requires_test_change(request, []) is True
+
+
 def test_developer_recovery_applies_write_in_isolated_workspace(tmp_path, monkeypatch) -> None:
     agent = DeveloperAgent()
     no_write_model = ScriptedModel([AIMessage(content="I inspected the request and made a plan.")])
