@@ -51,3 +51,51 @@ def test_collection_error_in_changed_test_is_repairable(monkeypatch) -> None:
     assert entry["details"]["repairable"] is True
     assert entry["details"]["matching_collection_change"] is True
     assert "changed test file" in entry["summary"]
+
+
+def test_collection_error_in_changed_source_is_repairable(monkeypatch) -> None:
+    agent = AgentUnderTest()
+
+    def failed_collection(**_: Any):
+        return (
+            {
+                "agent": "tester",
+                "status": "validated",
+                "summary": "Validation command completed.",
+                "details": {},
+            },
+            [
+                {
+                    "tool": "repo.run_command",
+                    "status": "error",
+                    "error": "SyntaxError: unterminated string literal",
+                    "result": {
+                        "collection_failed": True,
+                        "collection_error_paths": [
+                            r"C:\workspace\backend\app\api\routes.py"
+                        ],
+                    },
+                }
+            ],
+        )
+
+    monkeypatch.setattr(agent, "work", failed_collection)
+    state = {
+        "request": "Change GET /api/hello and update its test.",
+        "stage_results": [{"agent": "reviewer", "summary": "Approved."}],
+        "tool_events": [
+            {
+                "tool": "repo.write_file",
+                "status": "executed",
+                "arguments": {"file_path": "backend/app/api/routes.py"},
+            }
+        ],
+    }
+
+    result = agent.run(state)
+
+    entry = result["stage_results"][0]
+    assert entry["status"] == "validation_failed"
+    assert entry["details"]["repairable"] is True
+    assert entry["details"]["matching_collection_change"] is True
+    assert "changed source file" in entry["summary"]

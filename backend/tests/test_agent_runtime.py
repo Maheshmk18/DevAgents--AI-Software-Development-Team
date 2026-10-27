@@ -98,6 +98,23 @@ def test_repo_write_runs_inside_the_approved_isolated_branch(tmp_path, monkeypat
     assert (tmp_path / "src" / "api.py").read_text(encoding="utf-8") == "ready = True\n"
 
 
+@pytest.mark.parametrize("append", [False, True])
+def test_repo_write_rejects_invalid_python_without_changing_file(tmp_path, append: bool) -> None:
+    client = RepositoryMCPClient(root_path=str(tmp_path))
+    target = tmp_path / "routes.py"
+    original = "def ping():\n    return {'message': 'pong'}\n"
+    target.write_text(original, encoding="utf-8")
+
+    with pytest.raises(ValueError, match=r"Python syntax check failed for routes\.py at line \d+"):
+        client.write_file(
+            "routes.py",
+            "description='Returns a response\n",
+            append=append,
+        )
+
+    assert target.read_text(encoding="utf-8") == original
+
+
 def test_tool_outside_the_role_is_refused(monkeypatch) -> None:
     registry = MCPToolRegistry(use_mcp=False)
     model = ScriptedModel(
@@ -381,12 +398,12 @@ def test_developer_receives_failed_validation_output() -> None:
             "agent": "tester",
             "tool": "repo.run_command",
             "status": "error",
-            "error": "GET /api/ping returned 404",
+            "error": "routes.py:37 SyntaxError: unterminated string literal",
         }],
     })
 
     assert "Do not only edit the test" in feedback
-    assert "GET /api/ping returned 404" in feedback
+    assert "routes.py:37 SyntaxError: unterminated string literal" in feedback
 
 
 def test_runtime_falls_back_when_the_provider_errors(monkeypatch) -> None:

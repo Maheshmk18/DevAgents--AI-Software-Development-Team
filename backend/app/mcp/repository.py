@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import os
 from pathlib import Path
 import re
@@ -109,6 +110,8 @@ class RepositoryMCPClient:
         if append:
             existing = target.read_text(encoding="utf-8") if target.is_file() else ""
             if content and content in existing:
+                if target.suffix.casefold() == ".py":
+                    self._validate_python_syntax(existing, file_path)
                 return {
                     "file_path": file_path,
                     "bytes_written": 0,
@@ -123,6 +126,8 @@ class RepositoryMCPClient:
             else:
                 separator = "\n\n"
             updated = f"{existing}{separator}{content}"
+            if target.suffix.casefold() == ".py":
+                self._validate_python_syntax(updated, file_path)
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(updated, encoding="utf-8")
             return {
@@ -140,9 +145,24 @@ class RepositoryMCPClient:
                     f"({new_size} bytes versus {current_size} bytes). The response may be truncated. "
                     "Read the complete file and preserve its unrelated content, or add a focused new file."
                 )
+        if target.suffix.casefold() == ".py":
+            self._validate_python_syntax(content, file_path)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")
         return {"file_path": file_path, "bytes_written": new_size}
+
+    @staticmethod
+    def _validate_python_syntax(content: str, file_path: str) -> None:
+        """Reject malformed Python before it can break imports or test collection."""
+        try:
+            ast.parse(content, filename=file_path)
+        except SyntaxError as exc:
+            location = f"line {exc.lineno}" if exc.lineno else "an unknown line"
+            message = exc.msg or "invalid syntax"
+            raise ValueError(
+                f"Python syntax check failed for {file_path} at {location}: {message}. "
+                "The file was not changed; correct the syntax and retry the write."
+            ) from exc
 
     def search_files(self, query: str, relative_path: str = ".") -> list[str]:
         base_path = self._resolve_path(relative_path)
