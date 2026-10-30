@@ -21,6 +21,8 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { Textarea } from '@/components/ui/textarea';
+import { LandingPage } from '@/pages/LandingPage';
+import { SignInPage } from '@/pages/SignInPage';
 
 type Task = {
   id: string;
@@ -182,18 +184,23 @@ type EvaluationHistoryItem = EvaluationResult & {
 };
 
 type AppPage = 'overview' | 'runs' | 'approvals' | 'integrations';
+type GoogleUser = { sub: string; email: string; name: string; picture?: string };
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? 'http://localhost:8000';
 
 async function api<T>(path: string): Promise<T> {
-  const response = await fetch(`${API_BASE}${path}`);
+  const response = await fetch(`${API_BASE}${path}`, { credentials: 'include' });
+  if (response.status === 401) {
+    window.location.assign('/signin');
+    throw new Error('Your Google session expired. Sign in again to continue.');
+  }
   if (!response.ok) {
     throw new Error('Request failed');
   }
   return response.json() as Promise<T>;
 }
 
-function App() {
+function WorkspaceApp({ user, onSignOut }: { user: GoogleUser; onSignOut: () => void }) {
   const [request, setRequest] = useState('');
   const [activePage, setActivePage] = useState<AppPage>('overview');
   const [sidebarCollapsed, setSidebarCollapsed] = useState(
@@ -333,7 +340,7 @@ function App() {
       return;
     }
     try {
-      await fetch(`${API_BASE}/api/runs`, { method: 'DELETE' });
+      await fetch(`${API_BASE}/api/runs`, { method: 'DELETE', credentials: 'include' });
       setEvaluation(null);
       setSelectedRunId(null);
       await refreshRuns();
@@ -357,7 +364,7 @@ function App() {
       }
     }, 500);
     try {
-      const response = await fetch(`${API_BASE}/api/connectors/${provider}/start`, { method: 'POST' });
+      const response = await fetch(`${API_BASE}/api/connectors/${provider}/start`, { method: 'POST', credentials: 'include' });
       const payload = (await response.json()) as { authorization_url?: string; detail?: string };
       if (!response.ok || !payload.authorization_url) {
         throw new Error(payload.detail || 'Could not start account authorization.');
@@ -374,7 +381,7 @@ function App() {
     setConnecting(provider);
     setError('');
     try {
-      const response = await fetch(`${API_BASE}/api/connectors/${provider}`, { method: 'DELETE' });
+      const response = await fetch(`${API_BASE}/api/connectors/${provider}`, { method: 'DELETE', credentials: 'include' });
       const payload = (await response.json()) as { detail?: string; provider_revoked?: boolean };
       if (!response.ok) throw new Error(payload.detail || 'Could not disconnect the account.');
       if (payload.provider_revoked === false) {
@@ -395,6 +402,7 @@ function App() {
     try {
       const response = await fetch(`${API_BASE}/api/connectors/github/repository`, {
         method: 'PUT',
+        credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ slug: selectedGithubRepo }),
       });
@@ -413,6 +421,7 @@ function App() {
     try {
       const result = await fetch(`${API_BASE}/api/evaluations`, {
         method: 'POST',
+        credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ run_id: runId }),
       });
@@ -435,6 +444,10 @@ function App() {
       setError('Please enter a feature or bug request.');
       return;
     }
+    if (value.length > 5000) {
+      setError('Please keep the request to 5,000 characters or fewer.');
+      return;
+    }
 
     setLoading(true);
     setError('');
@@ -442,12 +455,27 @@ function App() {
     try {
       const response = await fetch(`${API_BASE}/api/runs`, {
         method: 'POST',
+        credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ message: value }),
       });
 
       if (!response.ok) {
-        throw new Error('The backend rejected the request.');
+        const errorBody = await response.json().catch(() => null) as { detail?: unknown } | null;
+        const detail = errorBody?.detail;
+        let message = 'The backend rejected the request.';
+        if (typeof detail === 'string') {
+          message = detail;
+        } else if (Array.isArray(detail)) {
+          const messages = detail.flatMap((item) => {
+            if (item && typeof item === 'object' && 'msg' in item && typeof item.msg === 'string') {
+              return [item.msg];
+            }
+            return [];
+          });
+          if (messages.length) message = messages.join(' ');
+        }
+        throw new Error(message);
       }
 
       const run = (await response.json()) as Run;
@@ -470,6 +498,7 @@ function App() {
     try {
       const response = await fetch(`${API_BASE}/api/approvals/${approvalId}/decision`, {
         method: 'POST',
+        credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           action: decision,
@@ -509,7 +538,7 @@ function App() {
       void refreshRuns();
     }, 2500);
     return () => window.clearInterval(interval);
-  }, [shouldPoll]);
+  }, [shouldPoll, currentRun?.status]);
 
   const pageDetails: Record<AppPage, { title: string; description: string }> = {
     overview: {
@@ -763,11 +792,18 @@ function App() {
             <h1>{pageDetails[activePage].title}</h1>
             <p>{pageDetails[activePage].description}</p>
           </div>
-          {activePage !== 'overview' ? (
-            <Button className="primary-button topbar-action" type="button" onClick={() => setActivePage('overview')}>
-              <Plus size={16} /> New workflow
-            </Button>
-          ) : null}
+          <div className="workspace-topbar-actions">
+            {activePage !== 'overview' ? (
+              <Button className="primary-button topbar-action" type="button" onClick={() => setActivePage('overview')}>
+                <Plus size={16} /> New workflow
+              </Button>
+            ) : null}
+            <div className="signed-in-user" title={user.email}>
+              {user.picture ? <img src={user.picture} alt="" /> : <span>{user.name.slice(0, 1).toUpperCase()}</span>}
+              <span className="signed-in-user-copy"><strong>{user.name}</strong><small>{user.email}</small></span>
+              <button type="button" onClick={onSignOut}>Sign out</button>
+            </div>
+          </div>
         </header>
 
         {error ? (
@@ -794,6 +830,7 @@ function App() {
                     value={request}
                     onChange={(event) => setRequest(event.target.value)}
                     rows={4}
+                    maxLength={5000}
                     placeholder="Describe a feature, bug, or engineering task..."
                   />
                   <div className="request-form-footer">
@@ -1067,6 +1104,67 @@ function App() {
       </main>
     </div>
   );
+}
+
+function App() {
+  const [user, setUser] = useState<GoogleUser | null>(null);
+  const [authLoading, setAuthLoading] = useState(true);
+  const [path, setPath] = useState(window.location.pathname);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch(`${API_BASE}/api/auth/me`, { credentials: 'include' })
+      .then(async (response) => {
+        if (!response.ok) return null;
+        return response.json() as Promise<{ authenticated: boolean; user: GoogleUser | null }>;
+      })
+      .then((session) => {
+        if (!cancelled) setUser(session?.authenticated ? session.user : null);
+      })
+      .catch(() => {
+        if (!cancelled) setUser(null);
+      })
+      .finally(() => {
+        if (!cancelled) setAuthLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, []);
+
+  useEffect(() => {
+    const handlePathChange = () => setPath(window.location.pathname);
+    window.addEventListener('popstate', handlePathChange);
+    return () => window.removeEventListener('popstate', handlePathChange);
+  }, []);
+
+  function signInWithGoogle() {
+    if (user) {
+      window.location.assign('/app');
+      return;
+    }
+    window.location.assign(`${API_BASE}/api/auth/google/start`);
+  }
+
+  async function signOut() {
+    try {
+      await fetch(`${API_BASE}/api/auth/logout`, { method: 'POST', credentials: 'include' });
+    } catch {
+      // Clear the local view even when the backend is temporarily unavailable.
+    } finally {
+      setUser(null);
+      window.location.assign('/');
+    }
+  }
+
+  const isWorkspace = path === '/app' || path.startsWith('/app/');
+  if (isWorkspace && authLoading) {
+    return <main className="auth-loading-screen"><span className="marketing-brand-mark"><GitBranch size={18} /></span><p>Checking your Google session…</p></main>;
+  }
+  if (isWorkspace && user) return <WorkspaceApp user={user} onSignOut={() => void signOut()} />;
+  if (path === '/signin' || isWorkspace) {
+    const loginError = new URLSearchParams(window.location.search).get('error') ?? undefined;
+    return <SignInPage onSignIn={signInWithGoogle} error={loginError} signedIn={Boolean(user)} />;
+  }
+  return <LandingPage onSignIn={signInWithGoogle} signedIn={Boolean(user)} />;
 }
 
 export default App;

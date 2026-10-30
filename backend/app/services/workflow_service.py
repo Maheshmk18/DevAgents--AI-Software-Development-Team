@@ -188,9 +188,10 @@ class WorkflowService:
 
     def list_runs(self) -> list[dict[str, Any]]:
         mongo_runs = db_list_runs()
-        if mongo_runs:
-            return [self._serialize_run(run) for run in mongo_runs]
-        return [self._serialize_run(run) for run in self.runs.values()]
+        runs = mongo_runs if mongo_runs else list(self.runs.values())
+        for run in runs:
+            self._sync_completed_pr_run(run)
+        return [self._serialize_run(run) for run in runs]
 
     def list_approvals(self) -> list[dict[str, Any]]:
         mongo_approvals = db_list_approvals()
@@ -200,9 +201,28 @@ class WorkflowService:
 
     def get_run(self, run_id: str) -> dict[str, Any] | None:
         mongo_run = db_get_run(run_id)
-        if mongo_run:
-            return mongo_run
-        return self.runs.get(run_id)
+        run = mongo_run if mongo_run else self.runs.get(run_id)
+        if run is not None:
+            self._sync_completed_pr_run(run)
+        return run
+
+    def _sync_completed_pr_run(self, run: dict[str, Any]) -> None:
+        """Normalize old PR-review statuses after workflow delivery is complete."""
+        if run.get("status") != "waiting_for_pr_review" or not run.get("pull_request_url"):
+            return
+
+        approval_id = run.get("action_approval")
+        approval = self.approvals.get(str(approval_id)) if approval_id else None
+        if approval_id and approval is None:
+            approval = db_get_approval(str(approval_id))
+        if approval and approval.get("status") == "pending":
+            run["status"] = "waiting_for_action_approval"
+        else:
+            run["status"] = "completed"
+        run["current_stage"] = None
+        run["updated_at"] = datetime.now(timezone.utc)
+        self.runs[str(run.get("id") or "")] = run
+        insert_run(run)
 
     def get_approval(self, approval_id: str) -> dict[str, Any] | None:
         mongo_approval = db_get_approval(approval_id)
@@ -647,6 +667,10 @@ class WorkflowService:
 
         if not other_actions:
             run["deferred_actions"] = [pull_request_action, *report_actions]
+            if run.get("status") != "completed_with_errors":
+                run["status"] = "completed"
+            run["current_stage"] = None
+            run["updated_at"] = datetime.now(timezone.utc)
             self.runs[run_id] = run
             insert_run(run)
             return
@@ -679,7 +703,7 @@ class WorkflowService:
         run["deferred_actions"] = [pull_request_action, *report_actions, *other_actions]
         run["action_approval"] = approval["id"]
         run["approvals"] = _dedupe([*run.get("approvals", []), approval["id"]])
-        run["status"] = "waiting_for_pr_review"
+        run["status"] = "waiting_for_action_approval"
         self.runs[run_id] = run
         insert_run(run)
 
@@ -802,12 +826,12 @@ class WorkflowService:
                 result for result in run["action_results"]
                 if result.get("status") in {"error", "blocked"}
             ]
-            if decision == "reject" and run.get("pull_request_url"):
-                run["status"] = "waiting_for_pr_review"
+            if failed_actions:
+                run["status"] = "completed_with_errors"
+            elif decision == "reject" and run.get("pull_request_url"):
+                run["status"] = "completed"
             elif decision == "reject":
                 run["status"] = "rejected"
-            elif failed_actions:
-                run["status"] = "completed_with_errors"
             else:
                 run["status"] = "completed"
             run["current_stage"] = None
@@ -942,7 +966,8 @@ class WorkflowService:
         if failed_actions:
             run["status"] = "completed_with_errors"
         elif awaiting_pr_review and run.get("pull_request_url"):
-            run["status"] = "waiting_for_pr_review"
+            # Post-PR report actions may still run before the workflow is complete.
+            run["status"] = "delivering"
         else:
             run["status"] = "completed"
         run["current_stage"] = None

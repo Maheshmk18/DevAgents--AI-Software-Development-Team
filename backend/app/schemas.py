@@ -1,11 +1,16 @@
 from datetime import datetime, timezone
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class RunRequest(BaseModel):
-    message: str = Field(..., min_length=3, max_length=5000)
+    message: str = Field(..., min_length=1, max_length=5000)
+
+    @field_validator("message", mode="before")
+    @classmethod
+    def strip_message(cls, value: Any) -> Any:
+        return value.strip() if isinstance(value, str) else value
 
 
 class TaskCreate(BaseModel):

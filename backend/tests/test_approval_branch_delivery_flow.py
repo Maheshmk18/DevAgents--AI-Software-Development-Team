@@ -272,7 +272,7 @@ def test_created_pr_is_emailed_with_report_before_optional_action_approval(monke
 
     run = service.get_run(run_id)
     assert calls == [[pull_request], [email]]
-    assert run["status"] == "waiting_for_pr_review"
+    assert run["status"] == "completed"
     assert run["pull_request_url"] == "https://github.com/acme/widget/pull/42"
     assert run.get("action_approval") is None
     assert [result["tool"] for result in run["action_results"]] == [
@@ -281,7 +281,7 @@ def test_created_pr_is_emailed_with_report_before_optional_action_approval(monke
     ]
 
 
-def test_created_pr_without_extra_actions_waits_for_github_review(monkeypatch) -> None:
+def test_created_pr_without_extra_actions_completes_workflow(monkeypatch) -> None:
     _disable_database(monkeypatch)
     service = WorkflowService()
     run_id = "f" * 32
@@ -303,10 +303,45 @@ def test_created_pr_without_extra_actions_waits_for_github_review(monkeypatch) -
     service._publish_pr_then_queue_actions(run_id, pull_request, [])
 
     run = service.get_run(run_id)
-    assert run["status"] == "waiting_for_pr_review"
+    assert run["status"] == "completed"
     assert run["pull_request_url"].endswith("/pull/43")
     assert run.get("action_approval") is None
     assert service.approvals == {}
+
+
+def test_legacy_pr_review_status_completes_when_workflow_is_already_delivered(monkeypatch) -> None:
+    _disable_database(monkeypatch)
+    service = WorkflowService()
+    run_id = "b" * 32
+    service.runs[run_id] = {
+        "id": run_id,
+        "status": "waiting_for_pr_review",
+        "current_stage": None,
+        "pull_request_url": "https://github.com/acme/widget/pull/42",
+        "tool_events": [],
+        "action_results": [],
+    }
+
+    run = service.get_run(run_id)
+
+    assert run is not None
+    assert run["status"] == "completed"
+    assert run["pull_request_url"] == "https://github.com/acme/widget/pull/42"
+
+
+def test_legacy_pr_review_with_pending_optional_action_stays_awaiting_approval(monkeypatch) -> None:
+    _disable_database(monkeypatch)
+    service = WorkflowService()
+    run_id = "c" * 32
+    service.runs[run_id] = {
+        "id": run_id,
+        "status": "waiting_for_pr_review",
+        "pull_request_url": "https://github.com/acme/widget/pull/43",
+        "action_approval": "approval-1",
+    }
+    service.approvals["approval-1"] = {"id": "approval-1", "status": "pending"}
+
+    assert service.get_run(run_id)["status"] == "waiting_for_action_approval"
 
 
 def test_failed_pr_does_not_queue_optional_actions(monkeypatch) -> None:
@@ -416,7 +451,7 @@ def test_failed_pr_blocks_report_email(monkeypatch) -> None:
     assert sent == []
 
 
-def test_rejecting_optional_action_keeps_open_pr_waiting_for_review(monkeypatch) -> None:
+def test_rejecting_optional_action_completes_run_with_pr_open(monkeypatch) -> None:
     _disable_database(monkeypatch)
     service = WorkflowService()
     run_id = "c" * 32
@@ -441,7 +476,7 @@ def test_rejecting_optional_action_keeps_open_pr_waiting_for_review(monkeypatch)
     service.update_approval(approval["id"], "reject")
 
     run = service.get_run(run_id)
-    assert run["status"] == "waiting_for_pr_review"
+    assert run["status"] == "completed"
     assert [result["event_id"] for result in run["action_results"]] == ["mail"]
     assert [result["status"] for result in run["action_results"]] == ["skipped"]
 

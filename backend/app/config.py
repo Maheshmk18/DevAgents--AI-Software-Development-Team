@@ -46,6 +46,11 @@ class Settings(BaseSettings):
     #: Public URL used in OAuth callback URIs. Keep this aligned with the
     #: callback URLs configured in the GitHub and Google OAuth applications.
     backend_public_url: str = Field(default="http://localhost:8002")
+    #: Public frontend origin for OAuth callback redirects.
+    frontend_public_url: str = Field(default="http://localhost:5173")
+    #: Dedicated signing key for app login sessions. Falls back to the private
+    #: Google OAuth client secret for local setups that have not set this yet.
+    auth_session_secret: str = Field(default="")
     #: When true, agent tool calls are routed through real MCP stdio servers.
     #: When false (or if a server fails to start) the in-process clients are used.
     mcp_enabled: bool = Field(default=True)

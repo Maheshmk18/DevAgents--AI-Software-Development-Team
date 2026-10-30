@@ -371,6 +371,18 @@ button:focus-visible, a:focus-visible, textarea:focus-visible, select:focus-visi
 }
 .topbar p { margin: 7px 0 0; color: var(--muted); font-size: 14px; }
 .topbar-action { flex: 0 0 auto; }
+.workspace-topbar-actions { display: flex; align-items: center; justify-content: flex-end; gap: 15px; }
+.signed-in-user { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.signed-in-user > img, .signed-in-user > span:first-child { display: grid; width: 31px; height: 31px; flex: 0 0 auto; place-items: center; overflow: hidden; border-radius: 50%; color: #fff; background: #3158d5; font-size: 12px; font-weight: 700; }
+.signed-in-user > img { object-fit: cover; }
+.signed-in-user-copy { display: flex; min-width: 0; flex-direction: column; gap: 2px; }
+.signed-in-user-copy strong { overflow: hidden; max-width: 140px; color: #344054; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.signed-in-user-copy small { overflow: hidden; max-width: 160px; color: #8993a3; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.signed-in-user button { padding: 7px 9px; border: 1px solid #e1e5eb; border-radius: 6px; color: #637086; background: #fff; font-size: 10px; cursor: pointer; }
+.signed-in-user button:hover { border-color: #bfc8d7; color: #3158d5; }
+.auth-loading-screen { display: flex; min-height: 100vh; flex-direction: column; align-items: center; justify-content: center; gap: 14px; color: #758194; background: #f7f6f2; font: 13px 'DM Sans', 'Segoe UI', sans-serif; }
+.auth-loading-screen .marketing-brand-mark { display: grid; width: 38px; height: 38px; place-items: center; border-radius: 10px; color: #fff; background: #1d2940; }
+.auth-loading-screen p { margin: 0; }
 
 .page-content {
   display: flex;
@@ -875,6 +887,8 @@ button:focus-visible, a:focus-visible, textarea:focus-visible, select:focus-visi
   .run-detail-heading { flex-direction: column; }
   .evaluation-strip { align-items: flex-start; flex-direction: column; }
   .page-toolbar > div { align-items: flex-start; flex-direction: column; gap: 4px; }
+  .workspace-topbar-actions { align-items: flex-end; flex-direction: column; gap: 8px; }
+  .signed-in-user-copy { display: none; }
 }
 
 .plan-review { display: grid; gap: 12px; margin-top: 12px; }
