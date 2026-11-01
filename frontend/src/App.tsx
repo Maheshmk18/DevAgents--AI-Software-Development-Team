@@ -186,7 +186,9 @@ type EvaluationHistoryItem = EvaluationResult & {
 type AppPage = 'overview' | 'runs' | 'approvals' | 'integrations';
 type GoogleUser = { sub: string; email: string; name: string; picture?: string };
 
-const API_BASE = import.meta.env.VITE_API_BASE ?? 'http://localhost:8000';
+const API_BASE =
+  import.meta.env.VITE_API_BASE ??
+  (import.meta.env.DEV ? 'http://localhost:8000' : '');
 
 async function api<T>(path: string): Promise<T> {
   const response = await fetch(`${API_BASE}${path}`, { credentials: 'include' });
