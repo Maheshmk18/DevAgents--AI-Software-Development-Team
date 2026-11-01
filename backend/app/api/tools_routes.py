@@ -2,11 +2,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from app.integrations.errors import IntegrationError
 from app.mcp.tool_registry import MCPToolRegistry
+from app.services.agent_run_context import agent_run_context
 
 router = APIRouter(prefix="/api/tools", tags=["tools"])
 tool_registry = MCPToolRegistry()
@@ -49,43 +50,47 @@ async def list_tools() -> list[dict[str, str]]:
 
 
 @router.post("/gmail/messages")
-async def list_gmail_messages(request: GmailListRequest) -> dict[str, Any]:
+async def list_gmail_messages(request: GmailListRequest, http_request: Request) -> dict[str, Any]:
     try:
-        return tool_registry.call_tool("gmail.list_messages", {"query": request.query, "max_results": request.max_results})
+        with agent_run_context(user_id=str(http_request.state.user["sub"])):
+            return tool_registry.call_tool("gmail.list_messages", {"query": request.query, "max_results": request.max_results})
     except Exception as exc:
         raise _fail(exc) from exc
 
 
 @router.post("/gmail/send")
-async def send_gmail_message(request: GmailSendRequest) -> dict[str, Any]:
+async def send_gmail_message(request: GmailSendRequest, http_request: Request) -> dict[str, Any]:
     try:
-        return tool_registry.call_tool(
-            "gmail.send_email",
-            {
-                "to": request.to,
-                "subject": request.subject,
-                "body": request.body,
-                "cc": request.cc,
-            },
-        )
+        with agent_run_context(user_id=str(http_request.state.user["sub"])):
+            return tool_registry.call_tool(
+                "gmail.send_email",
+                {
+                    "to": request.to,
+                    "subject": request.subject,
+                    "body": request.body,
+                    "cc": request.cc,
+                },
+            )
     except Exception as exc:
         raise _fail(exc) from exc
 
 
 @router.post("/github/repository")
-async def get_github_repository(request: GitHubRepoRequest) -> dict[str, Any]:
+async def get_github_repository(request: GitHubRepoRequest, http_request: Request) -> dict[str, Any]:
     try:
-        return tool_registry.call_tool("github.get_repository", {"owner": request.owner, "repo": request.repo})
+        with agent_run_context(user_id=str(http_request.state.user["sub"])):
+            return tool_registry.call_tool("github.get_repository", {"owner": request.owner, "repo": request.repo})
     except Exception as exc:
         raise _fail(exc) from exc
 
 
 @router.post("/github/issues")
-async def create_github_issue(request: GitHubIssueRequest) -> dict[str, Any]:
+async def create_github_issue(request: GitHubIssueRequest, http_request: Request) -> dict[str, Any]:
     try:
-        return tool_registry.call_tool(
-            "github.create_issue",
-            {"owner": request.owner, "repo": request.repo, "title": request.title, "body": request.body},
-        )
+        with agent_run_context(user_id=str(http_request.state.user["sub"])):
+            return tool_registry.call_tool(
+                "github.create_issue",
+                {"owner": request.owner, "repo": request.repo, "title": request.title, "body": request.body},
+            )
     except Exception as exc:
         raise _fail(exc) from exc

@@ -84,11 +84,17 @@ button:focus-visible, a:focus-visible, textarea:focus-visible, select:focus-visi
 .sidebar {
   position: sticky;
   top: 0;
+  align-self: start;
   display: flex;
   flex-direction: column;
-  gap: 24px;
+  gap: clamp(12px, 2.6vh, 24px);
   height: 100vh;
-  min-height: 680px;
+  height: 100dvh;
+  min-height: 0;
+  max-height: 100dvh;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
   padding: 18px 15px 15px;
   color: #F8F3F0;
   background: var(--navy);
@@ -217,11 +223,12 @@ button:focus-visible, a:focus-visible, textarea:focus-visible, select:focus-visi
   background: transparent;
   text-align: left;
   font-size: 14px;
+  white-space: nowrap;
   cursor: pointer;
   transition: background .15s ease, color .15s ease;
 }
 
-.nav-item svg { color: #9ca8ba; }
+.nav-item svg { flex: 0 0 auto; color: #9ca8ba; }
 .nav-item:hover { color: #fff; background: rgba(255,255,255,.06); }
 .nav-item.active {
   color: #fff;
@@ -229,7 +236,7 @@ button:focus-visible, a:focus-visible, textarea:focus-visible, select:focus-visi
   background: rgba(255, 255, 255, .17);
 }
 .nav-item.active svg { color: #C8DCF2; }
-.nav-item > span:nth-child(2) { flex: 1; }
+.nav-item > span:nth-child(2) { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .nav-count {
   display: inline-grid;
@@ -279,6 +286,7 @@ button:focus-visible, a:focus-visible, textarea:focus-visible, select:focus-visi
   color: #e3e8f0;
   font-size: 14px;
 }
+.sidebar-account-row > span:nth-child(2) { min-width: 0; }
 .sidebar-collapsed .sidebar {
   align-items: center;
   padding-right: 10px;
@@ -335,6 +343,8 @@ button:focus-visible, a:focus-visible, textarea:focus-visible, select:focus-visi
 .sidebar-footer strong, .sidebar-footer small { display: block; }
 .sidebar-footer strong { color: #dce3ed; font-size: 14px; font-weight: 600; }
 .sidebar-footer small { margin-top: 3px; color: #8794a8; font-size: 12px; }
+.sidebar-user-copy { min-width: 0; overflow: hidden; }
+.sidebar-user-copy strong, .sidebar-user-copy small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .footer-avatar { width: 27px; height: 27px; border-radius: 50%; font-size: 12px; }
 
 .main-panel {
@@ -834,7 +844,7 @@ button:focus-visible, a:focus-visible, textarea:focus-visible, select:focus-visi
 
 @media (max-width: 850px) {
   .app-shell { grid-template-columns: 1fr; }
-  .sidebar { position: relative; display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 13px; width: 100%; height: auto; min-height: 0; padding: 13px 18px; }
+  .sidebar { position: relative; display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 13px; width: 100%; height: auto; min-height: 0; max-height: none; overflow: visible; padding: 13px 18px; }
   .sidebar-header { grid-column: 1 / -1; }
   .brand-box { padding: 0; }
   .workspace-switcher, .sidebar-spacer, .sidebar-accounts, .sidebar-footer { display: none; }
@@ -848,6 +858,14 @@ button:focus-visible, a:focus-visible, textarea:focus-visible, select:focus-visi
   .app-shell.sidebar-collapsed .sidebar { grid-template-columns: 1fr; }
   .app-shell.sidebar-collapsed .sidebar-header { grid-column: 1; flex-direction: row; }
   .app-shell.sidebar-collapsed .sidebar-nav { display: none; }
+}
+
+@media (min-width: 851px) and (max-height: 720px) {
+  .sidebar { gap: 11px; padding-top: 12px; padding-bottom: 10px; }
+  .review-nav-label { margin-top: 9px; }
+  .sidebar-spacer { min-height: 6px; }
+  .sidebar-accounts { padding-top: 9px; padding-bottom: 7px; }
+  .sidebar-accounts p { display: none; }
 }
 
 @media (max-width: 600px) {

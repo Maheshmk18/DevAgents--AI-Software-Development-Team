@@ -41,9 +41,9 @@ async def ping() -> dict[str, str]:
 
 
 @router.get("/connections")
-async def connections() -> dict[str, Any]:
+async def connections(request: Request) -> dict[str, Any]:
     """Where each integration is configured and whether it is live (no secrets)."""
-    return connection_status()
+    return connection_status(str(request.state.user["sub"]))
 
 
 @router.get("/llm")
@@ -52,33 +52,33 @@ async def llm_status() -> dict[str, Any]:
 
 
 @router.post("/runs", status_code=status.HTTP_201_CREATED)
-async def create_run(request: RunRequest) -> dict[str, Any]:
-    run_record = workflow_service.create_run(request.message)
-    return run_record
+async def create_run(request: RunRequest, http_request: Request) -> dict[str, Any]:
+    run_record = workflow_service.create_run(request.message, str(http_request.state.user["sub"]))
+    return workflow_service.serialize_run(run_record)
 
 
 @router.get("/runs")
-async def list_runs() -> list[dict[str, Any]]:
-    return workflow_service.list_runs()
+async def list_runs(request: Request) -> list[dict[str, Any]]:
+    return workflow_service.list_runs(str(request.state.user["sub"]))
 
 
 @router.get("/runs/{run_id}")
-async def get_run(run_id: str) -> dict[str, Any]:
-    run = workflow_service.get_run(run_id)
+async def get_run(run_id: str, request: Request) -> dict[str, Any]:
+    run = workflow_service.get_run(run_id, str(request.state.user["sub"]))
     if run is None:
         raise HTTPException(status_code=404, detail="Run not found")
     return workflow_service.serialize_run(run)
 
 
 @router.delete("/runs")
-async def clear_runs() -> dict[str, Any]:
+async def clear_runs(request: Request) -> dict[str, Any]:
     """Wipe the run history (runs, approvals, evaluations) for a clean console."""
-    return {"deleted": workflow_service.clear_runs()}
+    return {"deleted": workflow_service.clear_runs(str(request.state.user["sub"]))}
 
 
 @router.delete("/runs/{run_id}")
-async def delete_run(run_id: str) -> dict[str, Any]:
-    if not workflow_service.delete_run(run_id):
+async def delete_run(run_id: str, request: Request) -> dict[str, Any]:
+    if not workflow_service.delete_run(run_id, str(request.state.user["sub"])):
         raise HTTPException(status_code=404, detail="Run not found")
     return {"deleted": 1, "run_id": run_id}
 

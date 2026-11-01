@@ -5,7 +5,7 @@ from html import escape
 import logging
 from typing import cast
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
@@ -40,10 +40,10 @@ def _provider(value: str) -> Provider:
 
 
 @router.post("/{provider}/start")
-async def start_connection(provider: str) -> dict[str, str]:
+async def start_connection(provider: str, request: Request) -> dict[str, str]:
     selected = _provider(provider)
     try:
-        return begin_connection(selected)
+        return begin_connection(selected, str(request.state.user["sub"]))
     except CredentialStoreError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except ConnectorError as exc:
@@ -51,31 +51,42 @@ async def start_connection(provider: str) -> dict[str, str]:
 
 
 @router.get("/github/repositories")
-async def list_github_repositories() -> dict[str, object]:
+async def list_github_repositories(request: Request) -> dict[str, object]:
     try:
-        return await run_in_threadpool(GitHubClient().list_repositories)
+        user_id = str(request.state.user["sub"])
+        return await run_in_threadpool(GitHubClient(user_id).list_repositories)
     except IntegrationError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 @router.put("/github/repository")
-async def select_github_repository(selection: GitHubRepositorySelection) -> dict[str, str]:
+async def select_github_repository(
+    selection: GitHubRepositorySelection, request: Request = None
+) -> dict[str, str]:
+    user_id = str(request.state.user["sub"]) if request is not None else None
     try:
-        credentials = credential_store.get_credentials("github")
+        credentials = (
+            credential_store.get_credentials("github", user_id)
+            if user_id is not None
+            else credential_store.get_credentials("github")
+        )
     except CredentialStoreError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
-    if not (credentials or {}).get("access_token") and not settings.github_token:
+    if not (credentials or {}).get("access_token") and not (user_id is None and settings.github_token):
         raise HTTPException(status_code=409, detail="Connect GitHub before selecting a repository.")
     owner, repo = selection.slug.split("/", 1)
     try:
-        repository = await run_in_threadpool(GitHubClient().get_repository, owner, repo)
+        repository = await run_in_threadpool(GitHubClient(user_id).get_repository, owner, repo)
     except IntegrationError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     canonical = f"{repository['owner']}/{repository['repo']}"
     credentials = credentials or {}
     credentials["default_repo"] = canonical
     try:
-        await run_in_threadpool(credential_store.save_credentials, "github", credentials)
+        if user_id is None:
+            await run_in_threadpool(credential_store.save_credentials, "github", credentials)
+        else:
+            await run_in_threadpool(credential_store.save_credentials, "github", credentials, user_id)
     except CredentialStoreError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     return {"slug": canonical, "status": "selected"}
@@ -171,10 +182,11 @@ async def finish_connection_callback(
 
 
 @router.delete("/{provider}")
-async def disconnect_connector(provider: str) -> dict[str, object]:
+async def disconnect_connector(provider: str, request: Request) -> dict[str, object]:
     selected = _provider(provider)
+    user_id = str(request.state.user["sub"])
     try:
-        revoked = await run_in_threadpool(disconnect, selected)
+        revoked = await run_in_threadpool(disconnect, selected, user_id)
     except CredentialStoreError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     return {"provider": selected, "status": "disconnected", "provider_revoked": revoked}

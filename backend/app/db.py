@@ -93,8 +93,14 @@ def ensure_indexes() -> None:
     try:
         database.runs.create_index("created_at")
         database.runs.create_index("status")
+        database.runs.create_index("owner_id")
         database.approvals.create_index("status")
+        database.approvals.create_index("owner_id")
         database.evaluations.create_index("run_id")
+        database.evaluations.create_index("owner_id")
+        database.user_credentials.create_index(
+            [("user_id", 1), ("provider", 1)], unique=True
+        )
     except Exception:
         return
 
@@ -114,6 +120,38 @@ def _use_memory() -> bool:
     return _memory_mode
 
 
+def _require_database() -> None:
+    """Credential storage must be durable; never silently put tokens in memory."""
+    try:
+        client.admin.command("ping")
+        _remember(False)
+    except Exception as exc:
+        _remember(True)
+        raise RuntimeError("MongoDB is unavailable for secure account storage.") from exc
+
+
+def get_user_credential(user_id: str, provider: str) -> str | None:
+    _require_database()
+    document = database.user_credentials.find_one(
+        {"user_id": user_id, "provider": provider}, {"encrypted_payload": 1}
+    )
+    return str(document["encrypted_payload"]) if document and document.get("encrypted_payload") else None
+
+
+def save_user_credential(user_id: str, provider: str, encrypted_payload: str) -> None:
+    _require_database()
+    database.user_credentials.replace_one(
+        {"user_id": user_id, "provider": provider},
+        {"user_id": user_id, "provider": provider, "encrypted_payload": encrypted_payload},
+        upsert=True,
+    )
+
+
+def delete_user_credential(user_id: str, provider: str) -> None:
+    _require_database()
+    database.user_credentials.delete_one({"user_id": user_id, "provider": provider})
+
+
 def insert_run(document: dict) -> dict:
     normalized = _clean(document)
     if _use_memory():
@@ -125,28 +163,40 @@ def insert_run(document: dict) -> dict:
     return normalized
 
 
-def list_runs() -> list[dict]:
+def _owner_filter(owner_id: str | None) -> dict:
+    return {"owner_id": owner_id} if owner_id is not None else {}
+
+
+def list_runs(owner_id: str | None = None) -> list[dict]:
     if _use_memory():
-        return list(_MEMORY_FALLBACK["runs"].values())
-    return [_clean(doc) for doc in database.runs.find().sort("created_at", -1)]
+        return [
+            run for run in _MEMORY_FALLBACK["runs"].values()
+            if owner_id is None or run.get("owner_id") == owner_id
+        ]
+    return [_clean(doc) for doc in database.runs.find(_owner_filter(owner_id)).sort("created_at", -1)]
 
 
-def get_run(run_id: str) -> dict | None:
+def get_run(run_id: str, owner_id: str | None = None) -> dict | None:
     if _use_memory():
-        return _MEMORY_FALLBACK["runs"].get(run_id)
-    return _clean(database.runs.find_one({"id": run_id}))
+        run = _MEMORY_FALLBACK["runs"].get(run_id)
+        return run if run is not None and (owner_id is None or run.get("owner_id") == owner_id) else None
+    return _clean(database.runs.find_one({"id": run_id, **_owner_filter(owner_id)}))
 
 
-def list_approvals() -> list[dict]:
+def list_approvals(owner_id: str | None = None) -> list[dict]:
     if _use_memory():
-        return list(_MEMORY_FALLBACK["approvals"].values())
-    return [_clean(doc) for doc in database.approvals.find().sort("created_at", -1)]
+        return [
+            approval for approval in _MEMORY_FALLBACK["approvals"].values()
+            if owner_id is None or approval.get("owner_id") == owner_id
+        ]
+    return [_clean(doc) for doc in database.approvals.find(_owner_filter(owner_id)).sort("created_at", -1)]
 
 
-def get_approval(approval_id: str) -> dict | None:
+def get_approval(approval_id: str, owner_id: str | None = None) -> dict | None:
     if _use_memory():
-        return _MEMORY_FALLBACK["approvals"].get(approval_id)
-    return _clean(database.approvals.find_one({"id": approval_id}))
+        approval = _MEMORY_FALLBACK["approvals"].get(approval_id)
+        return approval if approval is not None and (owner_id is None or approval.get("owner_id") == owner_id) else None
+    return _clean(database.approvals.find_one({"id": approval_id, **_owner_filter(owner_id)}))
 
 
 def insert_approval(document: dict) -> dict:
@@ -158,42 +208,50 @@ def insert_approval(document: dict) -> dict:
     return normalized
 
 
-def update_approval(approval_id: str, update: dict) -> dict | None:
+def update_approval(approval_id: str, update: dict, owner_id: str | None = None) -> dict | None:
     if _use_memory():
         existing = _MEMORY_FALLBACK["approvals"].get(approval_id)
-        if existing is None:
+        if existing is None or (owner_id is not None and existing.get("owner_id") != owner_id):
             return None
         existing.update(update)
         _MEMORY_FALLBACK["approvals"][approval_id] = existing
         return existing
     result = database.approvals.find_one_and_update(
-        {"id": approval_id},
+        {"id": approval_id, **_owner_filter(owner_id)},
         {"$set": _normalize_value({key: value for key, value in update.items() if key != "_id"})},
         return_document=True,
     )
     return _clean(result)
 
 
-def list_evaluations() -> list[dict]:
+def list_evaluations(owner_id: str | None = None) -> list[dict]:
     if _use_memory():
-        return list(_MEMORY_FALLBACK["evaluations"].values())
-    return [_clean(doc) for doc in database.evaluations.find().sort("created_at", -1)]
+        return [
+            item for item in _MEMORY_FALLBACK["evaluations"].values()
+            if owner_id is None or item.get("owner_id") == owner_id
+        ]
+    return [_clean(doc) for doc in database.evaluations.find(_owner_filter(owner_id)).sort("created_at", -1)]
 
 
-def get_evaluation(run_id: str) -> dict | None:
+def get_evaluation(run_id: str, owner_id: str | None = None) -> dict | None:
     if _use_memory():
-        return _MEMORY_FALLBACK["evaluations"].get(run_id)
-    return _clean(database.evaluations.find_one({"run_id": run_id}))
+        item = _MEMORY_FALLBACK["evaluations"].get(run_id)
+        return item if item is not None and (owner_id is None or item.get("owner_id") == owner_id) else None
+    return _clean(database.evaluations.find_one({"run_id": run_id, **_owner_filter(owner_id)}))
 
 
-def delete_run(run_id: str) -> None:
+def delete_run(run_id: str, owner_id: str | None = None) -> None:
     """Delete a run and everything that hangs off it (approvals, evaluation).
 
     The console lists one card per approval and one entry per evaluation, so
     leaving orphans behind is what made old test runs keep cluttering the UI.
     """
     if _use_memory():
-        _MEMORY_FALLBACK["runs"].pop(run_id, None)
+        run = _MEMORY_FALLBACK["runs"].get(run_id)
+        if run is not None and (owner_id is None or run.get("owner_id") == owner_id):
+            _MEMORY_FALLBACK["runs"].pop(run_id, None)
+        else:
+            return
         for approval_id in [
             key
             for key, value in _MEMORY_FALLBACK["approvals"].items()
@@ -202,23 +260,38 @@ def delete_run(run_id: str) -> None:
             _MEMORY_FALLBACK["approvals"].pop(approval_id, None)
         _MEMORY_FALLBACK["evaluations"].pop(run_id, None)
         return
-    database.runs.delete_one({"id": run_id})
-    database.approvals.delete_many({"run_id": run_id})
-    database.evaluations.delete_many({"run_id": run_id})
+    query = {"id": run_id, **_owner_filter(owner_id)}
+    database.runs.delete_one(query)
+    database.approvals.delete_many({"run_id": run_id, **_owner_filter(owner_id)})
+    database.evaluations.delete_many({"run_id": run_id, **_owner_filter(owner_id)})
 
 
-def delete_all_runs() -> int:
-    """Wipe the whole run history. Returns how many runs were removed."""
+def delete_all_runs(owner_id: str | None = None) -> int:
+    """Wipe one account's history, or all history for an unscoped caller."""
     if _use_memory():
-        count = len(_MEMORY_FALLBACK["runs"])
-        _MEMORY_FALLBACK["runs"].clear()
-        _MEMORY_FALLBACK["approvals"].clear()
-        _MEMORY_FALLBACK["evaluations"].clear()
+        selected = [
+            run_id for run_id, run in _MEMORY_FALLBACK["runs"].items()
+            if owner_id is None or run.get("owner_id") == owner_id
+        ]
+        count = len(selected)
+        selected_ids = set(selected)
+        for run_id in selected:
+            _MEMORY_FALLBACK["runs"].pop(run_id, None)
+            _MEMORY_FALLBACK["evaluations"].pop(run_id, None)
+        for approval_id, approval in list(_MEMORY_FALLBACK["approvals"].items()):
+            if approval.get("run_id") in selected_ids or (
+                owner_id is not None and approval.get("owner_id") == owner_id
+            ) or owner_id is None:
+                _MEMORY_FALLBACK["approvals"].pop(approval_id, None)
+        for evaluation_id, evaluation in list(_MEMORY_FALLBACK["evaluations"].items()):
+            if owner_id is None or evaluation.get("owner_id") == owner_id:
+                _MEMORY_FALLBACK["evaluations"].pop(evaluation_id, None)
         return count
-    count = database.runs.count_documents({})
-    database.runs.delete_many({})
-    database.approvals.delete_many({})
-    database.evaluations.delete_many({})
+    query = _owner_filter(owner_id)
+    count = database.runs.count_documents(query)
+    database.runs.delete_many(query)
+    database.approvals.delete_many(_owner_filter(owner_id))
+    database.evaluations.delete_many(_owner_filter(owner_id))
     return count
 
 

@@ -782,8 +782,8 @@ function WorkspaceApp({ user, onSignOut }: { user: GoogleUser; onSignOut: () => 
           <p>Agents use these accounts for repository work and approved reports.</p>
         </section>
         <div className="sidebar-footer">
-          <div className="footer-avatar">A</div>
-          <div><strong>Workspace owner</strong><small>Private engineering team</small></div>
+          <div className="footer-avatar">{user.name.trim().slice(0, 1).toUpperCase()}</div>
+          <div className="sidebar-user-copy"><strong title={user.name}>{user.name}</strong><small title={user.email}>{user.email}</small></div>
         </div>
       </aside>
 
@@ -1070,14 +1070,14 @@ function WorkspaceApp({ user, onSignOut }: { user: GoogleUser; onSignOut: () => 
                     <p className="repository-setting-help">New workflows will use the saved repository.</p>
                   </div>
                 ) : null}
-                {!github?.connected && !github?.connect_enabled ? <p className="integration-notice">GitHub setup is not available yet. Ask your workspace administrator to finish connecting this account.</p> : null}
+                {!github?.connect_enabled && github?.setup_hint ? <p className="integration-notice">{github.setup_hint}</p> : null}
                 <div className="integration-actions">
                   <button type="button" className={github?.connected ? 'ghost-button' : 'primary-button'} disabled={!github?.connect_enabled || connecting !== null} onClick={() => void connectAccount('github')}>
-                    {connecting === 'github' ? 'Connecting...' : github?.connected && !github.connect_enabled ? 'Connected' : github?.source === 'oauth' ? 'Change GitHub account' : github?.connected ? 'Connect GitHub account' : 'Connect GitHub'}
+                    {connecting === 'github' ? 'Connecting...' : github?.connected && !github.connect_enabled ? 'Connected' : github?.source === 'oauth' ? 'Connect another GitHub account' : github?.connected ? 'Connect GitHub account' : 'Connect GitHub'}
                   </button>
                   {github?.source === 'oauth' ? <button type="button" className="text-button disconnect-button" disabled={connecting !== null} onClick={() => void disconnectAccount('github')}>Disconnect</button> : null}
                 </div>
-                {github?.source === 'oauth' ? <p className="github-account-help">Choose another signed-in account in GitHub. If only the current account appears, sign out there and sign in with the account you want.</p> : null}
+                {github?.source === 'oauth' ? <p className="github-account-help">GitHub may reuse the account already signed in to your browser. To switch, sign out of GitHub in another tab, then click “Connect another GitHub account” here.</p> : null}
               </article>
 
               <article className="content-card integration-card">
@@ -1161,7 +1161,7 @@ function App() {
   if (isWorkspace && authLoading) {
     return <main className="auth-loading-screen"><span className="marketing-brand-mark"><GitBranch size={18} /></span><p>Checking your Google session…</p></main>;
   }
-  if (isWorkspace && user) return <WorkspaceApp user={user} onSignOut={() => void signOut()} />;
+  if (isWorkspace && user) return <WorkspaceApp key={user.sub} user={user} onSignOut={() => void signOut()} />;
   if (path === '/signin' || isWorkspace) {
     const loginError = new URLSearchParams(window.location.search).get('error') ?? undefined;
     return <SignInPage onSignIn={signInWithGoogle} error={loginError} signedIn={Boolean(user)} />;

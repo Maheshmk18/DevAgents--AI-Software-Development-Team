@@ -37,13 +37,26 @@ class GmailClient:
         self._token: str | None = None
         self._expires_at: float = 0.0
 
+    @staticmethod
+    def _owner_id() -> str | None:
+        from app.services.agent_run_context import active_user_id
+
+        return active_user_id()
+
     # ------------------------------------------------------------------ auth
 
     def _access_token(self) -> str:
+        owner_id = self._owner_id()
         try:
-            credentials = credential_store.get_credentials("gmail")
+            credentials = (
+                credential_store.get_credentials("gmail", owner_id)
+                if owner_id is not None
+                else credential_store.get_credentials("gmail")
+            )
         except CredentialStoreError as exc:
             credentials = None
+            if owner_id is not None:
+                raise IntegrationNotConfigured(str(exc)) from exc
             if not settings.gmail_refresh_token and not settings.gmail_access_token:
                 raise IntegrationNotConfigured(str(exc)) from exc
 
@@ -53,9 +66,11 @@ class GmailClient:
             if access_token and (not expires_at or time.time() < float(expires_at) - 60):
                 return access_token
             if credentials.get("refresh_token"):
-                return self._refresh_access_token(credentials)
+                return self._refresh_access_token(credentials, owner_id)
             raise IntegrationAuthError("Gmail access expired. Reconnect Gmail from the console.")
 
+        if owner_id is not None:
+            raise IntegrationNotConfigured("Gmail is not connected for this Google account. Connect Gmail in Integrations.")
         if settings.gmail_refresh_token and settings.google_client_id and settings.google_client_secret:
             if self._token and time.time() < self._expires_at:
                 return self._token
@@ -68,7 +83,9 @@ class GmailClient:
             "GMAIL_ACCESS_TOKEN, in backend/.env and restart the backend."
         )
 
-    def _refresh_access_token(self, credentials: dict[str, Any] | None = None) -> str:
+    def _refresh_access_token(
+        self, credentials: dict[str, Any] | None = None, owner_id: str | None = None
+    ) -> str:
         refresh_token = (
             str(credentials.get("refresh_token") or "")
             if credentials is not None
@@ -91,6 +108,11 @@ class GmailClient:
             raise IntegrationError(f"Gmail token refresh failed: {exc}") from exc
 
         if response.status_code != 200:
+            if owner_id is not None:
+                raise IntegrationAuthError(
+                    "Gmail rejected this account's saved refresh token "
+                    f"({response.status_code}). Reconnect the Gmail account in Integrations."
+                )
             raise IntegrationAuthError(
                 "Gmail rejected the stored refresh token "
                 f"({response.status_code}). Re-run the OAuth consent flow and update "
@@ -109,7 +131,7 @@ class GmailClient:
             credentials["expires_at"] = expires_at
             if payload.get("refresh_token"):
                 credentials["refresh_token"] = payload["refresh_token"]
-            credential_store.save_credentials("gmail", credentials)
+            credential_store.save_credentials("gmail", credentials, owner_id)
         else:
             self._token = access_token
             self._expires_at = expires_at
@@ -167,8 +189,13 @@ class GmailClient:
         message["Subject"] = subject
         if cc:
             message["Cc"] = cc
+        owner_id = self._owner_id()
         try:
-            credentials = credential_store.get_credentials("gmail")
+            credentials = (
+                credential_store.get_credentials("gmail", owner_id)
+                if owner_id is not None
+                else credential_store.get_credentials("gmail")
+            )
         except CredentialStoreError:
             credentials = None
         # OAuth verifies the mailbox identity during setup. Prefer it over a
@@ -177,7 +204,7 @@ class GmailClient:
         if credentials and credentials.get("access_token"):
             sender = str(credentials.get("account") or "").strip()
         else:
-            sender = settings.gmail_sender_email.strip()
+            sender = settings.gmail_sender_email.strip() if owner_id is None else ""
         if sender and sender != _PLACEHOLDER_SENDER:
             message["From"] = sender
         message.set_content(body)

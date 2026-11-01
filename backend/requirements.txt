@@ -6,6 +6,7 @@ pymongo==4.9.1
 python-dotenv==1.0.1
 requests==2.32.3
 keyring>=25.6,<27
+cryptography>=43,<46
 
 # --- LLM provider: Groq only, via LangChain --------------------------------
 # The agents run on Groq chat models (langchain-groq -> the `groq` SDK).

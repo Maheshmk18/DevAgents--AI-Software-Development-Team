@@ -6,7 +6,7 @@ from typing import Any
 from app.config import settings
 from app.integrations.github import GitHubClient
 from app.integrations.gmail import GmailClient
-from app.services.agent_run_context import active_repository_root, active_repository_slug
+from app.services.agent_run_context import active_repository_root, active_repository_slug, active_user_id
 from app.mcp.manager import get_mcp_manager
 from app.mcp.repository import RepositoryMCPClient
 
@@ -78,16 +78,22 @@ _PLACEHOLDER_VALUES: frozenset[str] = frozenset(
 )
 
 
-def default_repo_parts() -> tuple[str, str]:
+def default_repo_parts(user_id: str | None = None) -> tuple[str, str]:
     """Return the selected OAuth repo, or the configured ``GITHUB_REPO`` fallback."""
     from app.services import credential_store
     from app.services.credential_store import CredentialStoreError
 
+    owner_id = user_id if user_id is not None else active_user_id()
     try:
-        credentials = credential_store.get_credentials("github")
+        credentials = (
+            credential_store.get_credentials("github", owner_id)
+            if owner_id is not None
+            else credential_store.get_credentials("github")
+        )
     except CredentialStoreError:
         credentials = None
-    slug = str((credentials or {}).get("default_repo") or settings.github_repo or "").strip().strip("/")
+    fallback_repo = "" if owner_id is not None else settings.github_repo
+    slug = str((credentials or {}).get("default_repo") or fallback_repo or "").strip().strip("/")
     if "/" not in slug:
         return "", ""
     owner, _, repo = slug.partition("/")
@@ -376,7 +382,8 @@ class MCPToolRegistry:
         arguments = resolve_repo_arguments(tool_name, arguments)
         server = self.server_for(tool_name)
         scoped_workspace_tool = tool_name.startswith("repo.") and active_repository_root() is not None
-        if self.use_mcp and server is not None and not scoped_workspace_tool:
+        user_scoped_external_tool = active_user_id() is not None and server in {"github", "gmail"}
+        if self.use_mcp and server is not None and not scoped_workspace_tool and not user_scoped_external_tool:
             try:
                 raw = self.manager.call_tool(server, tool_name.split(".", 1)[1], arguments)
                 return {"result": _unwrap(tool_name, raw), "via": "mcp", "server": server}

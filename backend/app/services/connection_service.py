@@ -15,34 +15,39 @@ def _tone(configured: bool, short_lived: bool = False) -> str:
     return "warn" if short_lived else "ok"
 
 
-def _stored_credentials(provider: str) -> dict[str, Any] | None:
+def _stored_credentials(provider: str, user_id: str | None = None) -> dict[str, Any] | None:
     try:
-        return credential_store.get_credentials(provider)
+        return (
+            credential_store.get_credentials(provider, user_id)
+            if user_id is not None
+            else credential_store.get_credentials(provider)
+        )
     except CredentialStoreError:
         return None
 
 
-def _github(storage_available: bool) -> dict[str, Any]:
+def _github(storage_available: bool, user_id: str | None = None) -> dict[str, Any]:
     from app.mcp.tool_registry import default_repo_parts
     from app.services.connector_service import redirect_uri
 
-    owner, repo = default_repo_parts()
-    credentials = _stored_credentials("github") or {}
+    owner, repo = default_repo_parts(user_id)
+    credentials = _stored_credentials("github", user_id) or {}
     oauth_connected = bool(credentials.get("access_token"))
-    connected = oauth_connected or bool(settings.github_token)
+    environment_connected = user_id is None and bool(settings.github_token)
+    connected = oauth_connected or environment_connected
     client_ready = bool(settings.github_oauth_client_id and settings.github_oauth_client_secret)
     return {
         "connected": connected,
         "tone": _tone(connected),
         "account": credentials.get("account"),
-        "source": "oauth" if oauth_connected else "environment" if settings.github_token else None,
+        "source": "oauth" if oauth_connected else "environment" if environment_connected else None,
         "connect_enabled": client_ready and storage_available,
         "repository_selection_enabled": connected and storage_available,
         "callback_url": redirect_uri("github"),
         "setup_hint": (
             "Set GITHUB_OAUTH_CLIENT_ID and GITHUB_OAUTH_CLIENT_SECRET in backend/.env."
             if not client_ready
-            else "Enable Windows Credential Manager to store OAuth tokens securely."
+            else "MongoDB and AUTH_SESSION_SECRET are required for encrypted account storage."
             if not storage_available
             else None
         ),
@@ -53,23 +58,24 @@ def _github(storage_available: bool) -> dict[str, Any]:
             "Connect in the console; the OAuth app credentials live in backend/.env."
             if oauth_connected
             else "GitHub token is configured in backend/.env as GITHUB_TOKEN."
-            if settings.github_token
-            else "Connect GitHub in the console or configure GITHUB_TOKEN in backend/.env."
+            if environment_connected
+            else "Connect your GitHub account in Integrations."
         ),
     }
 
 
-def _gmail(storage_available: bool) -> dict[str, Any]:
+def _gmail(storage_available: bool, user_id: str | None = None) -> dict[str, Any]:
     from app.services.connector_service import redirect_uri
 
-    credentials = _stored_credentials("gmail") or {}
-    sender = settings.gmail_sender_email
+    credentials = _stored_credentials("gmail", user_id) or {}
+    sender = settings.gmail_sender_email if user_id is None else ""
     if sender == "you@example.com":
         sender = ""
     account = credentials.get("account") or sender or None
     oauth_connected = bool(credentials.get("access_token"))
-    configured = oauth_connected or settings.gmail_configured
-    mode = "oauth" if oauth_connected else settings.gmail_mode
+    environment_connected = user_id is None and settings.gmail_configured
+    configured = oauth_connected or environment_connected
+    mode = "oauth" if oauth_connected else settings.gmail_mode if environment_connected else "none"
     short_lived = mode == "access_token" and not oauth_connected
     client_ready = bool(settings.google_client_id and settings.google_client_secret)
     return {
@@ -77,13 +83,13 @@ def _gmail(storage_available: bool) -> dict[str, Any]:
         "tone": _tone(configured, short_lived),
         "mode": mode,
         "sender": account,
-        "source": "oauth" if oauth_connected else "environment" if settings.gmail_configured else None,
+        "source": "oauth" if oauth_connected else "environment" if environment_connected else None,
         "connect_enabled": client_ready and storage_available,
         "callback_url": redirect_uri("gmail"),
         "setup_hint": (
             "Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET for a Google Web application OAuth client in backend/.env."
             if not client_ready
-            else "Enable Windows Credential Manager to store OAuth tokens securely."
+            else "MongoDB and AUTH_SESSION_SECRET are required for encrypted account storage."
             if not storage_available
             else None
         ),
@@ -97,13 +103,17 @@ def _gmail(storage_available: bool) -> dict[str, Any]:
     }
 
 
-def connection_status() -> dict[str, Any]:
+def connection_status(user_id: str | None = None) -> dict[str, Any]:
     from app.db import database_status
     from app.services.llm_service import llm_service
 
-    storage_available = credential_store.is_available()
     db = database_status()
     db_ok = db.get("status") == "ok"
+    storage_available = (
+        credential_store.is_available(user_id)
+        if user_id is not None
+        else credential_store.is_available()
+    )
     llm_status = llm_service.status()
     groq_ready = llm_status["configured"]
     groq_healthy = (
@@ -112,8 +122,8 @@ def connection_status() -> dict[str, Any]:
         and llm_status["last_error"] is None
     )
     return {
-        "github": _github(storage_available),
-        "gmail": _gmail(storage_available),
+        "github": _github(storage_available, user_id),
+        "gmail": _gmail(storage_available, user_id),
         "mongo": {
             "connected": db_ok,
             "tone": _tone(db_ok),

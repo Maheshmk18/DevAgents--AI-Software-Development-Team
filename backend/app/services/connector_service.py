@@ -50,7 +50,7 @@ def _code_challenge(verifier: str) -> str:
     return base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
 
 
-def _remember_attempt(provider: Provider, state: str, verifier: str) -> None:
+def _remember_attempt(provider: Provider, state: str, verifier: str, user_id: str) -> None:
     now = time.time()
     with _pending_lock:
         expired = [key for key, item in _pending.items() if item["expires_at"] <= now]
@@ -59,6 +59,7 @@ def _remember_attempt(provider: Provider, state: str, verifier: str) -> None:
         _pending[state] = {
             "provider": provider,
             "verifier": verifier,
+            "user_id": user_id,
             "expires_at": now + _STATE_TTL_SECONDS,
         }
 
@@ -83,16 +84,16 @@ def validate_callback_state(provider: Provider, state: str) -> None:
     _consume_attempt(provider, state)
 
 
-def begin_connection(provider: Provider) -> dict[str, str]:
+def begin_connection(provider: Provider, user_id: str) -> dict[str, str]:
     client_id, _ = _provider_credentials(provider)
-    if not credential_store.is_available():
+    if not credential_store.is_available(user_id):
         raise CredentialStoreError(
-            "Enable Windows Credential Manager so connector tokens can be stored securely, then restart the backend."
+            "Connectors need MongoDB to be available and AUTH_SESSION_SECRET configured so account tokens can be stored encrypted."
         )
 
     state = secrets.token_urlsafe(32)
     verifier = secrets.token_urlsafe(64)
-    _remember_attempt(provider, state, verifier)
+    _remember_attempt(provider, state, verifier, user_id)
     common = {
         "client_id": client_id,
         "redirect_uri": redirect_uri(provider),
@@ -254,7 +255,10 @@ def finish_connection(provider: Provider, code: str, state: str) -> dict[str, st
         "account": account,
         "scope": tokens.get("scope"),
     }
-    credential_store.save_credentials(provider, credentials)
+    user_id = str(attempt.get("user_id") or "")
+    if not user_id:
+        raise ConnectorError("The signed-in account could not be verified. Start the connection again.")
+    credential_store.save_credentials(provider, credentials, user_id)
     return {"provider": provider, "account": account}
 
 
@@ -284,17 +288,25 @@ def _revoke_remote(provider: Provider, credentials: dict[str, Any]) -> bool:
         return False
 
 
-def disconnect(provider: Provider) -> bool:
+def disconnect(provider: Provider, user_id: str) -> bool:
     """Forget local tokens, and report whether remote revocation succeeded."""
-    credentials = credential_store.get_credentials(provider)
+    credentials = credential_store.get_credentials(provider, user_id)
     revoked = _revoke_remote(provider, credentials or {}) if credentials else True
-    credential_store.delete_credentials(provider)
+    credential_store.delete_credentials(provider, user_id)
     return revoked
 
 
-def connected_account(provider: Provider) -> str | None:
+def connected_account(provider: Provider, user_id: str | None = None) -> str | None:
+    if user_id is None:
+        from app.services.agent_run_context import active_user_id
+
+        user_id = active_user_id()
     try:
-        credentials = credential_store.get_credentials(provider)
+        credentials = (
+            credential_store.get_credentials(provider, user_id)
+            if user_id is not None
+            else credential_store.get_credentials(provider)
+        )
     except CredentialStoreError:
         return None
     account = credentials.get("account") if credentials else None
@@ -303,9 +315,14 @@ def connected_account(provider: Provider) -> str | None:
 
 def gmail_report_recipient() -> str | None:
     """Return only the connected Gmail identity as the final-report recipient."""
-    address = connected_account("gmail")
+    from app.services.agent_run_context import active_user_id
+
+    owner_id = active_user_id()
+    address = connected_account("gmail", owner_id)
     if address:
         return address
+    if owner_id is not None:
+        return None
     if settings.gmail_configured and settings.gmail_sender_email != "you@example.com":
         return settings.gmail_sender_email.strip() or None
     return None

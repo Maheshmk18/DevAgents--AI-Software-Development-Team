@@ -30,7 +30,7 @@ class Settings(BaseSettings):
     gmail_sender_email: str = Field(default="you@example.com")
     github_token: str = Field(default="")
     #: OAuth App credentials are configured once by the console operator. User
-    #: access tokens are obtained with OAuth and stored in the OS credential store.
+    #: access tokens are obtained with OAuth and stored encrypted per Google account.
     github_oauth_client_id: str = Field(default="")
     github_oauth_client_secret: str = Field(default="")
     #: Default GitHub repository ("owner/name") the agents operate on. When set,

@@ -16,12 +16,24 @@ from app.services.credential_store import CredentialStoreError
 
 
 class GitHubClient:
-    def __init__(self) -> None:
+    def __init__(self, user_id: str | None = None) -> None:
         self.base_url = "https://api.github.com"
+        self.user_id = user_id
+
+    def _owner_id(self) -> str | None:
+        if self.user_id is not None:
+            return self.user_id
+        from app.services.agent_run_context import active_user_id
+
+        return active_user_id()
 
     def _headers(self) -> dict[str, str]:
         token = self._access_token()
         if not token:
+            if self._owner_id() is not None:
+                raise IntegrationNotConfigured(
+                    "GitHub is not connected for this Google account. Connect GitHub in Integrations."
+                )
             raise IntegrationNotConfigured(
                 "GitHub is not connected: GITHUB_TOKEN is empty. Add a GitHub "
                 "personal access token to backend/.env and restart the backend."
@@ -33,14 +45,21 @@ class GitHubClient:
         }
 
     def _access_token(self) -> str:
+        owner_id = self._owner_id()
         try:
-            credentials = credential_store.get_credentials("github")
+            credentials = (
+                credential_store.get_credentials("github", owner_id)
+                if owner_id is not None
+                else credential_store.get_credentials("github")
+            )
         except CredentialStoreError as exc:
+            if owner_id is not None:
+                raise IntegrationNotConfigured(str(exc)) from exc
             if settings.github_token:
                 return settings.github_token
             raise IntegrationNotConfigured(str(exc)) from exc
         if not credentials:
-            return settings.github_token
+            return "" if owner_id is not None else settings.github_token
 
         expires_at = credentials.get("expires_at")
         access_token = str(credentials.get("access_token") or "")
@@ -84,7 +103,7 @@ class GitHubClient:
             credentials["refresh_token"] = payload["refresh_token"]
         if payload.get("refresh_token_expires_in"):
             credentials["refresh_expires_at"] = time.time() + int(payload["refresh_token_expires_in"])
-        credential_store.save_credentials("github", credentials)
+        credential_store.save_credentials("github", credentials, owner_id)
         return str(credentials["access_token"])
 
     def access_token(self) -> str:

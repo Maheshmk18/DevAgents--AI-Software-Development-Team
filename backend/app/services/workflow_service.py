@@ -13,6 +13,7 @@ from app.db import (
     get_evaluation as db_get_evaluation,
     get_run as db_get_run,
     insert_approval,
+    insert_evaluation,
     insert_run,
     list_approvals as db_list_approvals,
     list_evaluations as db_list_evaluations,
@@ -92,12 +93,13 @@ class WorkflowService:
         self._executing: set[str] = set()
         self._approval_lock = threading.Lock()
 
-    def create_run(self, user_message: str) -> dict[str, Any]:
+    def create_run(self, user_message: str, owner_id: str | None = None) -> dict[str, Any]:
         run_id = uuid4().hex
         now = datetime.now(timezone.utc)
         conversational_reply = _conversational_reply(user_message)
         run_data = {
             "id": run_id,
+            "owner_id": owner_id,
             "message": user_message,
             "status": "completed" if conversational_reply else "running",
             "current_stage": None if conversational_reply else "planning",
@@ -125,13 +127,14 @@ class WorkflowService:
             # don't call the LLM, create approval gates, or queue external work.
             insert_run(run_data)
             return run_data
-        run_data["tool_access"] = {
-            "planner": self.tool_registry.get_tools_for_agent("planner"),
-            "developer": self.tool_registry.get_tools_for_agent("developer"),
-            "reviewer": self.tool_registry.get_tools_for_agent("reviewer"),
-            "tester": self.tool_registry.get_tools_for_agent("tester"),
-            "docs": self.tool_registry.get_tools_for_agent("docs"),
-        }
+        with agent_run_context(user_id=owner_id):
+            run_data["tool_access"] = {
+                "planner": self.tool_registry.get_tools_for_agent("planner"),
+                "developer": self.tool_registry.get_tools_for_agent("developer"),
+                "reviewer": self.tool_registry.get_tools_for_agent("reviewer"),
+                "tester": self.tool_registry.get_tools_for_agent("tester"),
+                "docs": self.tool_registry.get_tools_for_agent("docs"),
+            }
         insert_run(run_data)
         self._start_plan(run_id)
         return run_data
@@ -149,6 +152,13 @@ class WorkflowService:
         thread.start()
 
     def _prepare_plan_in_background(self, run_id: str) -> None:
+        run = self.get_run(run_id)
+        if run is None:
+            return
+        with agent_run_context(user_id=run.get("owner_id")):
+            self._prepare_plan_scoped(run_id)
+
+    def _prepare_plan_scoped(self, run_id: str) -> None:
         try:
             run = self.get_run(run_id)
             if run is None:
@@ -186,22 +196,31 @@ class WorkflowService:
         finally:
             self._executing.discard(run_id)
 
-    def list_runs(self) -> list[dict[str, Any]]:
-        mongo_runs = db_list_runs()
-        runs = mongo_runs if mongo_runs else list(self.runs.values())
+    def list_runs(self, owner_id: str | None = None) -> list[dict[str, Any]]:
+        mongo_runs = db_list_runs(owner_id) if owner_id is not None else db_list_runs()
+        fallback_runs = [
+            run for run in self.runs.values()
+            if owner_id is None or run.get("owner_id") == owner_id
+        ]
+        runs = mongo_runs if mongo_runs else fallback_runs
         for run in runs:
             self._sync_completed_pr_run(run)
         return [self._serialize_run(run) for run in runs]
 
-    def list_approvals(self) -> list[dict[str, Any]]:
-        mongo_approvals = db_list_approvals()
+    def list_approvals(self, owner_id: str | None = None) -> list[dict[str, Any]]:
+        mongo_approvals = db_list_approvals(owner_id) if owner_id is not None else db_list_approvals()
         if mongo_approvals:
             return [self._serialize_approval(approval) for approval in mongo_approvals]
-        return [self._serialize_approval(approval) for approval in self.approvals.values()]
+        return [
+            self._serialize_approval(approval) for approval in self.approvals.values()
+            if owner_id is None or approval.get("owner_id") == owner_id
+        ]
 
-    def get_run(self, run_id: str) -> dict[str, Any] | None:
-        mongo_run = db_get_run(run_id)
+    def get_run(self, run_id: str, owner_id: str | None = None) -> dict[str, Any] | None:
+        mongo_run = db_get_run(run_id, owner_id) if owner_id is not None else db_get_run(run_id)
         run = mongo_run if mongo_run else self.runs.get(run_id)
+        if run is not None and owner_id is not None and run.get("owner_id") != owner_id:
+            return None
         if run is not None:
             self._sync_completed_pr_run(run)
         return run
@@ -224,30 +243,53 @@ class WorkflowService:
         self.runs[str(run.get("id") or "")] = run
         insert_run(run)
 
-    def get_approval(self, approval_id: str) -> dict[str, Any] | None:
-        mongo_approval = db_get_approval(approval_id)
+    def get_approval(self, approval_id: str, owner_id: str | None = None) -> dict[str, Any] | None:
+        mongo_approval = (
+            db_get_approval(approval_id, owner_id)
+            if owner_id is not None
+            else db_get_approval(approval_id)
+        )
         if mongo_approval:
             return mongo_approval
-        return self.approvals.get(approval_id)
+        approval = self.approvals.get(approval_id)
+        if approval is not None and owner_id is not None and approval.get("owner_id") != owner_id:
+            return None
+        return approval
 
-    def evaluate_run(self, run_id: str) -> dict[str, Any]:
-        run = self.get_run(run_id)
+    def evaluate_run(self, run_id: str, owner_id: str | None = None) -> dict[str, Any]:
+        run = self.get_run(run_id, owner_id)
         if run is None:
             raise KeyError("Run not found")
         result = self.evaluator_service.evaluate_run(run)
+        if owner_id is not None:
+            result["owner_id"] = owner_id
         self.evaluations[result["run_id"]] = result
+        if owner_id is not None:
+            insert_evaluation(result)
+        if owner_id is not None:
+            return {key: value for key, value in result.items() if key != "owner_id"}
         return result
 
-    def list_evaluations(self) -> list[dict[str, Any]]:
-        mongo_evaluations = db_list_evaluations()
+    def list_evaluations(self, owner_id: str | None = None) -> list[dict[str, Any]]:
+        mongo_evaluations = db_list_evaluations(owner_id) if owner_id is not None else db_list_evaluations()
         if mongo_evaluations:
-            return mongo_evaluations
-        return list(self.evaluations.values())
+            results = mongo_evaluations
+        else:
+            results = [
+                item for item in self.evaluations.values()
+                if owner_id is None or item.get("owner_id") == owner_id
+            ]
+        return [
+            {key: value for key, value in item.items() if key != "owner_id"}
+            for item in results
+        ]
 
-    def delete_run(self, run_id: str) -> bool:
+    def delete_run(self, run_id: str, owner_id: str | None = None) -> bool:
         """Remove a run and its approvals/evaluation. Returns False if unknown."""
-        existed = self.get_run(run_id) is not None
-        delete_run(run_id)
+        existed = self.get_run(run_id, owner_id) is not None
+        if not existed:
+            return False
+        delete_run(run_id, owner_id) if owner_id is not None else delete_run(run_id)
         self.runs.pop(run_id, None)
         self.evaluations.pop(run_id, None)
         for approval_id, approval in list(self.approvals.items()):
@@ -255,15 +297,30 @@ class WorkflowService:
                 self.approvals.pop(approval_id, None)
         return existed
 
-    def clear_runs(self) -> int:
+    def clear_runs(self, owner_id: str | None = None) -> int:
         """Delete the entire run history and return the number of runs removed."""
-        count = delete_all_runs()
-        self.runs.clear()
-        self.approvals.clear()
-        self.evaluations.clear()
+        count = delete_all_runs(owner_id) if owner_id is not None else delete_all_runs()
+        if owner_id is None:
+            self.runs.clear()
+            self.approvals.clear()
+            self.evaluations.clear()
+        else:
+            owned_run_ids = {
+                run_id for run_id, run in self.runs.items()
+                if run.get("owner_id") == owner_id
+            }
+            self.runs = {key: value for key, value in self.runs.items() if key not in owned_run_ids}
+            self.approvals = {
+                key: value for key, value in self.approvals.items()
+                if value.get("owner_id") != owner_id
+            }
+            self.evaluations = {
+                key: value for key, value in self.evaluations.items()
+                if value.get("owner_id") != owner_id
+            }
         return count
 
-    def start_execution(self, run_id: str) -> None:
+    def start_execution(self, run_id: str, owner_id: str | None = None) -> None:
         """Kick the dev-team graph off in a background thread.
 
         A full run waits on provider rate limits and can take minutes, which is
@@ -272,7 +329,7 @@ class WorkflowService:
         """
         if run_id in self._executing:
             return
-        run = self.get_run(run_id)
+        run = self.get_run(run_id, owner_id)
         if run is None:
             raise KeyError("Run not found")
 
@@ -292,6 +349,13 @@ class WorkflowService:
         thread.start()
 
     def _execute_in_background(self, run_id: str) -> None:
+        run = self.get_run(run_id)
+        if run is None:
+            return
+        with agent_run_context(user_id=run.get("owner_id")):
+            self._execute_in_background_scoped(run_id)
+
+    def _execute_in_background_scoped(self, run_id: str) -> None:
         try:
             run = self.get_run(run_id)
             if run is None:
@@ -344,7 +408,9 @@ class WorkflowService:
                 {"workspace_ready": True},
                 event_id=branch_event_id,
             )
-            with agent_run_context(workspace["workspace_root"], workspace["repository_slug"]):
+            with agent_run_context(
+                workspace["workspace_root"], workspace["repository_slug"], run.get("owner_id")
+            ):
                 self.execute_run(run_id)
         except Exception as exc:  # a crash must still settle the run
             self._fail_run(run_id, exc)
@@ -609,6 +675,20 @@ class WorkflowService:
         pull_request_action: dict[str, Any],
         additional_actions: list[dict[str, Any]],
     ) -> None:
+        run = self.get_run(run_id)
+        if run is None:
+            return
+        with agent_run_context(user_id=run.get("owner_id")):
+            self._publish_pr_then_queue_actions_scoped(
+                run_id, pull_request_action, additional_actions
+            )
+
+    def _publish_pr_then_queue_actions_scoped(
+        self,
+        run_id: str,
+        pull_request_action: dict[str, Any],
+        additional_actions: list[dict[str, Any]],
+    ) -> None:
         self._execute_approved_actions(
             run_id,
             [pull_request_action],
@@ -738,17 +818,30 @@ class WorkflowService:
 
     def create_approval(self, run_id: str, action: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         record = self.approval_service.create_approval(run_id, action, payload)
+        run = self.runs.get(run_id) or db_get_run(run_id)
+        if run and run.get("owner_id") is not None:
+            record["owner_id"] = run["owner_id"]
         self.approvals[record["id"]] = record
         insert_approval(record)
         return record
 
-    def update_approval(self, approval_id: str, decision: str, arguments: dict[str, Any] | None = None) -> dict[str, Any]:
+    def update_approval(
+        self,
+        approval_id: str,
+        decision: str,
+        arguments: dict[str, Any] | None = None,
+        owner_id: str | None = None,
+    ) -> dict[str, Any]:
         # Prefer this process's copy, but fall back to the stored record: after a
         # restart the in-memory maps are empty while the gate is still pending.
         with self._approval_lock:
-            approval = self.approvals.get(approval_id)
+            approval = self.get_approval(approval_id, owner_id)
             if approval is None:
-                approval = db_get_approval(approval_id)
+                approval = (
+                    db_get_approval(approval_id, owner_id)
+                    if owner_id is not None
+                    else db_get_approval(approval_id)
+                )
             if approval is None:
                 raise KeyError("Approval not found")
             if approval.get("status") != "pending":
@@ -758,11 +851,12 @@ class WorkflowService:
                 approval_id, decision, arguments, record=approval
             )
             self.approvals[approval_id] = approval
-            db_update_approval(approval_id, approval)
+            if owner_id is None:
+                db_update_approval(approval_id, approval)
+            else:
+                db_update_approval(approval_id, approval, owner_id)
 
-        run = self.runs.get(approval["run_id"])
-        if run is None:
-            run = db_get_run(approval["run_id"])
+        run = self.get_run(approval["run_id"], owner_id)
         if run is None:
             return approval
 
@@ -878,7 +972,7 @@ class WorkflowService:
             insert_run(run)
             # Never block the request on the whole workflow: it runs in the
             # background and the console follows it via polling.
-            self.start_execution(approval["run_id"])
+            self.start_execution(approval["run_id"], owner_id)
         elif approval.get("action") == "approve_plan_before_execution":
             run["status"] = "rejected"
             run["approvals"] = _dedupe([*run.get("approvals", []), approval_id])
@@ -888,6 +982,21 @@ class WorkflowService:
         return approval
 
     def _execute_approved_actions(
+        self,
+        run_id: str,
+        deferred: list[dict[str, Any]],
+        repository_work_failed: bool,
+        awaiting_pr_review: bool = False,
+    ) -> None:
+        run = self.get_run(run_id)
+        if run is None:
+            return
+        with agent_run_context(user_id=run.get("owner_id")):
+            self._execute_approved_actions_scoped(
+                run_id, deferred, repository_work_failed, awaiting_pr_review
+            )
+
+    def _execute_approved_actions_scoped(
         self,
         run_id: str,
         deferred: list[dict[str, Any]],
@@ -919,7 +1028,7 @@ class WorkflowService:
         workspace_root = str(run.get("workspace_root") or "")
         repository_slug = str(run.get("repository_slug") or "")
         if workspace_root and repository_slug:
-            with agent_run_context(workspace_root, repository_slug):
+            with agent_run_context(workspace_root, repository_slug, run.get("owner_id")):
                 action_results = self.execution_service.execute_deferred(
                     deferred,
                     run_context=run,
